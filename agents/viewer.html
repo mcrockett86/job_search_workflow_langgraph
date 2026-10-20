@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Job Search Viewer</title>
+<style>
+  :root {
+    --bg: #f6f7fb; --card: #ffffff; --ink: #1e293b; --muted: #64748b;
+    --accent: #4f46e5; --border: #e2e8f0;
+    --match: #16a34a; --rejected: #94a3b8; --seen: #d97706; --error: #dc2626;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink);
+         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 30; background: var(--card);
+           border-bottom: 1px solid var(--border); padding: 14px 20px; }
+  h1 { font-size: 1.15rem; display: inline-block; margin-right: 12px; }
+  .badges span { display: inline-block; font-size: .75rem; padding: 2px 10px; margin-right: 6px;
+                 border-radius: 999px; background: #eef2ff; color: #3730a3; cursor: pointer;
+                 border: 1px solid transparent; }
+  .badges span.active { border-color: var(--accent); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+  .toolbar select, .toolbar input[type=search], .toolbar input[type=number] {
+    padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: .85rem;
+    background: #fff; color: var(--ink); }
+  .toolbar input[type=search] { min-width: 220px; flex: 1 1 220px; }
+  .toolbar input[type=number] { width: 110px; }
+  button { padding: 7px 14px; border: none; border-radius: 8px; font-size: .85rem;
+           cursor: pointer; background: var(--accent); color: #fff; }
+  button.secondary { background: #eef2ff; color: #3730a3; }
+  button:disabled { opacity: .5; cursor: default; }
+  #runlog { display: none; margin-top: 10px; background: #0f172a; color: #a5f3fc;
+            font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+            padding: 10px 12px; border-radius: 8px; max-height: 180px; overflow-y: auto;
+            white-space: pre-wrap; }
+  main { max-width: 1100px; margin: 0 auto; padding: 18px 20px 60px; }
+  .job { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+         padding: 14px 16px; margin-bottom: 12px; position: relative; }
+  .job h2 { font-size: 1rem; }
+  .job h2 a { color: var(--accent); text-decoration: none; }
+  .job h2 a:hover { text-decoration: underline; }
+  .meta { color: var(--muted); font-size: .8rem; margin-top: 3px; }
+  .chip { position: absolute; top: 14px; right: 14px; font-size: .68rem; font-weight: 600;
+          padding: 2px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+  .chip.match { background: #dcfce7; color: var(--match); }
+  .chip.rejected { background: #f1f5f9; color: var(--rejected); }
+  .chip.seen { background: #fef3c7; color: var(--seen); }
+  .chip.error { background: #fee2e2; color: var(--error); }
+  .summary { margin-top: 8px; font-size: .87rem; color: #334155; line-height: 1.45; }
+  .summary.empty { color: var(--muted); font-style: italic; }
+  .actions { margin-top: 8px; display: flex; gap: 10px; }
+  .actions a, .actions button { font-size: .78rem; padding: 4px 10px; }
+  #hovercard { position: fixed; z-index: 50; display: none; width: 420px; max-height: 320px;
+               overflow-y: auto; background: #fff; border: 1px solid var(--border);
+               border-radius: 12px; box-shadow: 0 12px 32px rgba(15,23,42,.18);
+               padding: 14px 16px; font-size: .8rem; line-height: 1.5; white-space: pre-wrap;
+               color: #334155; pointer-events: none; }
+  #hovercard .hc-title { font-weight: 700; color: var(--ink); margin-bottom: 6px;
+                         white-space: normal; }
+  #drawer { position: fixed; inset: 0; z-index: 40; display: none; background: rgba(15,23,42,.45); }
+  #drawer .panel { position: absolute; right: 0; top: 0; bottom: 0; width: min(640px, 92vw);
+                   background: #fff; padding: 22px 24px; overflow-y: auto;
+                   box-shadow: -8px 0 30px rgba(15,23,42,.25); }
+  #drawer h2 { margin-bottom: 4px; padding-right: 90px; }
+  #drawer .close { position: absolute; top: 16px; right: 18px; }
+  #drawer .nav { margin-top: 16px; display: flex; gap: 8px; }
+  #drawer pre { white-space: pre-wrap; font: 13px/1.55 ui-monospace, Menlo, monospace;
+                color: #334155; margin-top: 10px; }
+  .empty-state { text-align: center; color: var(--muted); padding: 60px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Job Search Viewer</h1>
+  <span class="badges" id="badges"></span>
+  <div class="toolbar">
+    <button id="runbtn" title="Scrape LinkedIn and screen new jobs">▶ Run new scan</button>
+    <select id="f-status">
+      <option value="all">all statuses</option>
+      <option value="match">matches</option>
+      <option value="rejected">rejected</option>
+      <option value="seen">not screened</option>
+    </select>
+    <select id="f-company"><option value="">any company</option></select>
+    <select id="f-type"><option value="">any type</option></select>
+    <input type="search" id="f-search" placeholder="search title / company / text…">
+    <input type="number" id="f-salary" placeholder="min salary" min="0" step="1000">
+    <select id="f-sort">
+      <option value="seen">newest seen</option>
+      <option value="title">title A–Z</option>
+      <option value="company">company A–Z</option>
+      <option value="salary">salary high→low</option>
+    </select>
+    <button class="secondary" id="export-csv">Export CSV</button>
+    <button class="secondary" id="export-md">Export MD</button>
+  </div>
+  <div id="runlog"></div>
+</header>
+<main>
+  <div id="list"></div>
+  <div class="empty-state" id="empty" style="display:none">
+    No jobs yet. Click <b>▶ Run new scan</b> to scrape and screen, or drop a
+    <code>results_output.csv</code> / <code>cache/target_jobs_old.csv</code> and reload.
+  </div>
+</main>
+<div id="hovercard"></div>
+<div id="drawer"><div class="panel">
+  <button class="close secondary" id="drawer-close">✕ close</button>
+  <h2 id="drawer-title"></h2>
+  <div class="meta" id="drawer-meta"></div>
+  <div class="summary" id="drawer-summary"></div>
+  <pre id="drawer-preview">loading…</pre>
+  <div class="nav">
+    <button class="secondary" id="drawer-prev">← prev</button>
+    <button class="secondary" id="drawer-next">next →</button>
+    <button class="secondary" id="drawer-open">open listing ↗</button>
+  </div>
+</div></div>
+<script>
+const $ = (s) => document.querySelector(s);
+let jobs = [];
+let drawerIdx = -1;
+const previewCache = new Map();
+
+function qs() {
+  const p = new URLSearchParams();
+  for (const [k, sel] of [["status","#f-status"],["company","#f-company"],["job_type","#f-type"],
+                          ["search","#f-search"],["min_salary","#f-salary"],["sort","#f-sort"]]) {
+    const v = $(sel).value.trim();
+    if (v) p.set(k, v);
+  }
+  return p.toString();
+}
+
+async function loadFacets() {
+  const r = await fetch('/api/facets'); const d = await r.json();
+  const fill = (sel, items) => {
+    const cur = $(sel).value;
+    const first = $(sel).options[0].textContent;
+    $(sel).innerHTML = `<option value="">${first}</option>` +
+      items.map(i => `<option ${i===cur?'selected':''}>${esc(i)}</option>`).join('');
+  };
+  fill('#f-company', d.facets.companies);
+  fill('#f-type', d.facets.types);
+  const c = d.counts;
+  const badge = (st, label) =>
+    `<span data-st="${st}" class="${$('#f-status').value===st?'active':''}">${label}: ${c[st]||0}</span>`;
+  $('#badges').innerHTML = badge('all','total') + badge('match','matches') +
+    badge('rejected','rejected') + badge('seen','unscreened');
+  document.querySelectorAll('#badges span').forEach(el =>
+    el.onclick = () => { $('#f-status').value = el.dataset.st; loadJobs(); loadFacets(); });
+}
+
+async function loadJobs() {
+  const r = await fetch('/api/jobs?' + qs());
+  const d = await r.json();
+  jobs = d.jobs;
+  render();
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function salary(r) {
+  const lo = r.salary_min, hi = r.salary_max;
+  if (lo && hi && lo !== hi) return `$${(+lo).toLocaleString()}–$${(+hi).toLocaleString()}`;
+  if (lo || hi) return `$${(+ (lo||hi)).toLocaleString()}`;
+  return '';
+}
+
+function render() {
+  const list = $('#list');
+  $('#empty').style.display = jobs.length ? 'none' : 'block';
+  list.innerHTML = jobs.map((j, i) => {
+    const title = j.job_title || '(untitled)';
+    const comp = j.company_name || 'unknown company';
+    const sal = salary(j);
+    const seen = (j.last_seen || '').slice(0, 10);
+    return `<div class="job" data-i="${i}">
+      <span class="chip ${j.status}">${j.status}</span>
+      <h2><a href="${esc(j.job_url)}" target="_blank" rel="noopener">${esc(title)}</a></h2>
+      <div class="meta">${esc(comp)} ${j.job_type ? '· ' + esc(j.job_type) : ''} ${sal ? '· ' + sal : ''} · seen ${seen}</div>
+      <div class="summary ${j.summary ? '' : 'empty'}">${j.summary ? esc(j.summary) : 'no summary yet — hover for preview'}</div>
+      <div class="actions">
+        <button class="secondary" data-open="${i}">read ▸</button>
+      </div>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openDrawer(+b.dataset.open));
+  list.querySelectorAll('.job').forEach(card => {
+    card.addEventListener('mouseenter', onHover);
+    card.addEventListener('mouseleave', hideHover);
+  });
+}
+
+// ---- hover preview --------------------------------------------------------
+let hoverTimer = null;
+function onHover(e) {
+  const card = e.currentTarget;
+  clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => showHover(card), 350);
+}
+function hideHover() { clearTimeout(hoverTimer); $('#hovercard').style.display = 'none'; }
+
+async function showHover(card) {
+  const j = jobs[+card.dataset.i];
+  const hc = $('#hovercard');
+  hc.innerHTML = `<div class="hc-title">${esc(j.job_title || j.job_url)}</div>loading preview…`;
+  const rect = card.getBoundingClientRect();
+  hc.style.display = 'block';
+  const left = Math.min(rect.left, window.innerWidth - 440);
+  hc.style.left = Math.max(8, left) + 'px';
+  hc.style.top = Math.min(rect.bottom + 6, window.innerHeight - 40) + 'px';
+  let text = j.summary || '';
+  if (previewCache.has(j.job_url)) {
+    text = previewCache.get(j.job_url);
+  } else {
+    try {
+      const r = await fetch('/api/preview?url=' + encodeURIComponent(j.job_url));
+      if (r.ok) {
+        const d = await r.json();
+        previewCache.set(j.job_url, d.preview || d.summary || '');
+        text = d.preview || d.summary || text;
+      } else {
+        text = text || '(no public preview available — open the listing)';
+      }
+    } catch { text = text || '(preview fetch failed)'; }
+  }
+  if ($('#hovercard').style.display === 'block')
+    $('#hovercard').innerHTML = `<div class="hc-title">${esc(j.job_title || j.job_url)}</div>${esc(text)}`;
+}
+
+// ---- detail drawer (click-through) ----------------------------------------
+async function openDrawer(i) {
+  drawerIdx = i;
+  const j = jobs[i];
+  $('#drawer').style.display = 'block';
+  $('#drawer-title').textContent = j.job_title || '(untitled)';
+  $('#drawer-meta').textContent =
+    [j.company_name, j.job_type, salary(j), j.status, 'seen ' + (j.last_seen||'').slice(0,10)]
+      .filter(Boolean).join(' · ');
+  const s = $('#drawer-summary');
+  s.textContent = j.summary || '';
+  s.style.display = j.summary ? 'block' : 'none';
+  const pre = $('#drawer-preview');
+  $('#drawer-open').onclick = () => window.open(j.job_url, '_blank');
+  if (previewCache.has(j.job_url)) { pre.textContent = previewCache.get(j.job_url); return; }
+  pre.textContent = 'loading…';
+  try {
+    const r = await fetch('/api/preview?url=' + encodeURIComponent(j.job_url));
+    const d = await r.json();
+    const txt = d.preview || d.summary || '(no preview available)';
+    previewCache.set(j.job_url, txt);
+    pre.textContent = txt;
+  } catch { pre.textContent = '(preview fetch failed — open the listing)'; }
+}
+$('#drawer-close').onclick = () => $('#drawer').style.display = 'none';
+$('#drawer').onclick = (e) => { if (e.target.id === 'drawer') $('#drawer').style.display = 'none'; };
+$('#drawer-prev').onclick = () => { if (drawerIdx > 0) openDrawer(drawerIdx - 1); };
+$('#drawer-next').onclick = () => { if (drawerIdx < jobs.length - 1) openDrawer(drawerIdx + 1); };
+document.addEventListener('keydown', (e) => {
+  if ($('#drawer').style.display !== 'block') return;
+  if (e.key === 'Escape') $('#drawer').style.display = 'none';
+  if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); $('#drawer-next').click(); }
+  if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); $('#drawer-prev').click(); }
+});
+
+// ---- run pipeline ----------------------------------------------------------
+let pollTimer = null;
+$('#runbtn').onclick = async () => {
+  const r = await fetch('/api/run', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.detail || 'could not start run'); return; }
+  $('#runbtn').disabled = true;
+  $('#runlog').style.display = 'block';
+  pollTimer = setInterval(pollRun, 1500);
+  pollRun();
+};
+async function pollRun() {
+  const r = await fetch('/api/run/status');
+  const d = await r.json();
+  $('#runlog').textContent = d.log.join('\n');
+  $('#runlog').scrollTop = $('#runlog').scrollHeight;
+  if (!d.running) {
+    clearInterval(pollTimer); pollTimer = null;
+    $('#runbtn').disabled = false;
+    $('#runlog').textContent += d.error ? `\n✗ ${d.error}` : '\n✓ run finished';
+    loadJobs(); loadFacets();
+  }
+}
+
+// ---- export ----------------------------------------------------------------
+$('#export-csv').onclick = () => location.href = '/api/export?format=csv&' + qs();
+$('#export-md').onclick  = () => location.href = '/api/export?format=md&' + qs();
+
+// ---- wiring ----------------------------------------------------------------
+let debounce = null;
+['#f-status','#f-company','#f-type','#f-sort'].forEach(s =>
+  $(s).addEventListener('change', () => { loadJobs(); loadFacets(); }));
+$('#f-search').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadJobs, 250); });
+$('#f-salary').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadJobs, 400); });
+
+loadFacets(); loadJobs();
+</script>
+</body>
+</html>

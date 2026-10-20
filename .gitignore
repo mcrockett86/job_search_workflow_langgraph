@@ -205,3 +205,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# local secrets file (never commit)
+dotenv.env
+
+# runtime outputs / local artifacts
+results_output.csv
+.DS_Store
+agents/tools/resources/resume_*backup*.pdf
+cache/jobs.db

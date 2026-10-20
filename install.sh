@@ -10,7 +10,7 @@ uv venv
 source .venv/bin/activate
 
 # Install dependencies
-uv add "mcp[cli]" httpx fastmcp langchain-mcp-adapters langgraph langchain "langchain[openai]" pypdf html2text bs4 langchain-community langchain-core md2pdf pandas selenium webdriver-manager 
+uv add "mcp[cli]" httpx fastmcp langchain-mcp-adapters langgraph langchain "langchain[openai]" html2text bs4 langchain-community langchain-core pandas selenium webdriver-manager pypdf 
 
 # Install Markdownify-MCP
 git clone https://github.com/zcaceres/markdownify-mcp.git
