@@ -1,41 +1,46 @@
-from langchain.tools import tool
-from typing import Any
+"""Scrape a URL and extract plain-text content."""
+
+from __future__ import annotations
+
+import logging
 import requests
 from bs4 import BeautifulSoup
 import html2text
-import os
-import pdb
 
 
-# Reference: https://stackademic.com/blog/web-scraping-with-llms-using-langchain
-async def scraper_extract_html_from_url(url:str) -> str | None:    
-    """Navigate to a URL, Fetch HTML content, and convert it to plain text, excluding certain tags."""
+logger = logging.getLogger(__name__)
 
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Ubuntu; Firefox=41)'
-    }
+# Tags whose entire content should be stripped from the HTML before conversion.
+_EXCLUDED_TAGS: tuple[str, ...] = ("footer", "nav", "a", "script")
 
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Ubuntu; Firefox/41.0)",
+}
+
+_TIMEOUT_SECONDS = 10
+
+
+async def scraper_extract_html_from_url(url: str) -> str | None:
+    """Fetch *url*, strip unwanted tags, and return plain-text content.
+
+    Returns ``None`` when the request fails or returns empty content.
+    """
     try:
-        # Fetch HTML content from the URL using requests
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()  # Raise an exception for bad responses (4xx and 5xx)
-    
-        # Parse HTML content using BeautifulSoup
-        soup = BeautifulSoup(response.content, 'html.parser')
-        excluded_tagNames = ['footer', 'nav', 'a', 'script']
-        
-        # Exclude elements with class names 'footer' and 'navbar'
-        excluded_tags = excluded_tagNames or []  # Default to an empty list if not provided
-        for tag_name in excluded_tags:
-            for unwanted_tag in soup.find_all(tag_name):
-                unwanted_tag.extract()
+        response = requests.get(
+            url, headers=_HEADERS, timeout=_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
 
+        soup = BeautifulSoup(response.content, "html.parser")
 
-        # Convert HTML to plain text using html2text
+        # Remove all excluded tag elements from the DOM tree.
+        for tag_name in _EXCLUDED_TAGS:
+            for element in soup.find_all(tag_name):  # type: ignore[arg-type]
+                element.extract()
+
         text_content = html2text.html2text(str(soup))
-        #await ctx.debug(f"Data Fetched From {url}: {text_content}[0:100]")  # Log the first 100 characters of the text content
-        return text_content
+        return text_content if text_content.strip() else None
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data from {url}: {e}")
-        return ""
+    except requests.exceptions.RequestException as exc:
+        logger.error("Failed to fetch %s — %s", url, exc)
+        return None

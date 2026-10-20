@@ -1,0 +1,22 @@
+[project]
+name = "job-search-langgraph-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastmcp>=2.13.2",
+    "httpx>=0.28.1",
+    "langchain[openai]>=1.1.0",
+    "langchain-mcp-adapters>=0.1.14",
+    "langgraph>=1.0.4",
+    "mcp[cli]>=1.23.0",
+    "html2text>=2025.4.15",
+    "bs4>=0.0.2",
+    "langchain-community>=0.4.1",
+    "langchain-core>=1.1.0",
+    "pandas>=2.3.3",
+    "selenium>=4.38.0",
+    "webdriver-manager>=4.0.2",
+    "pypdf>=6.4.0",
+]
