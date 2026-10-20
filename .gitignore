@@ -213,3 +213,4 @@ dotenv.env
 results_output.csv
 .DS_Store
 agents/tools/resources/resume_*backup*.pdf
+cache/jobs.db

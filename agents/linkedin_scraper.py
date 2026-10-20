@@ -66,19 +66,22 @@ def _setup_driver(headless: bool | None = None) -> ChromeWebDriver:
 
 
 def _login(driver: "WebDriver", email: str, password: str) -> None:
-    """Log into LinkedIn using email and password."""
+    """Log into LinkedIn using email and password.
+
+    The browser window stays visible by default (LINKEDIN_HEADLESS=false) so
+    a human can complete any unexpected challenge (2FA/captcha) — but the
+    automated fill must run first so unattended runs work. A stray
+    ``breakpoint()`` here used to hang every web-triggered run in pdb.
+    """
     wait = WebDriverWait(driver, _LOGIN_TIMEOUT_SECONDS)
 
     # Navigate directly to the login page which shows both panels side-by-side.
     driver.get("https://www.linkedin.com/login")
-    breakpoint()
 
-    '''
     # The login page renders both panels (Sign in + Use passkey). We use the first email input.
-    email_field = driver.find_element(By.CSS_SELECTOR, "input[type='email']")
+    email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']")))
     password_field = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
 
-    time.sleep(5)
     email_field.send_keys(email)
     time.sleep(1)
     password_field.send_keys(password)
@@ -87,8 +90,28 @@ def _login(driver: "WebDriver", email: str, password: str) -> None:
     sign_in_button.click()
     time.sleep(5)
 
-    driver.find_element(By.XPATH, "//button[@type='submit']").click()
-    '''
+    # If LinkedIn shows a follow-up submit (e.g. consent/challenge), click it
+    # when present; otherwise proceed.
+    try:
+        submit = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))
+        )
+        submit.click()
+    except TimeoutException:
+        logger.info("No follow-up submit button — login appears complete")
+
+    # Wait until we're actually logged in (login page gone) so scraping does
+    # not start on a half-authenticated session.
+    try:
+        WebDriverWait(driver, _LOGIN_TIMEOUT_SECONDS).until(
+            lambda d: "/login" not in d.url and "/checkpoint" not in d.url
+        )
+    except TimeoutException:
+        logger.warning(
+            "Still on a login/checkpoint page after %ds — if LinkedIn asked "
+            "for 2FA, complete it in the browser window.",
+            _LOGIN_TIMEOUT_SECONDS,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +217,7 @@ def scrape_linkedin_job_urls(
     finally:
         driver.quit()
 
-    # Normalise URLs (strip query params).
-    cleaned = [u.split("/?")[0].replace("https", "http") for u in seen_urls]
+    # Normalise URLs (strip query params). NOTE: an earlier version rewrote
+    # https->http here, which produced broken click-out links in the viewer.
+    cleaned = [u.split("/?")[0] for u in seen_urls]
     return pd.DataFrame({"job_url": cleaned})

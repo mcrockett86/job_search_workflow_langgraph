@@ -17,6 +17,31 @@ from .config import CACHE_DIR, EXCLUDED_COMPANIES, PRIOR_JOBS_CSV, RESULTS_CSV, 
 logger = logging.getLogger(__name__)
 
 
+def _db_upsert_seen(urls: list[str]) -> None:
+    """Mirror scraped URLs into the SQLite viewer DB (best-effort)."""
+    try:
+        from .db import get_conn, merge_legacy_csvs, upsert_seen
+
+        conn = get_conn()
+        merge_legacy_csvs(conn)
+        upsert_seen(conn, urls)
+        conn.close()
+    except Exception as exc:  # noqa: BLE001 — DB is an additive view, never fatal
+        logger.warning("DB seen-upsert failed: %s", exc)
+
+
+def _db_upsert_results(rows: list[dict[str, Any]]) -> None:
+    """Mirror screened rows (with summaries) into the SQLite viewer DB."""
+    try:
+        from .db import get_conn, upsert_results
+
+        conn = get_conn()
+        upsert_results(conn, rows)
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DB results-upsert failed: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # Graph creation
 # ---------------------------------------------------------------------------
@@ -30,9 +55,11 @@ def create_job_graph():
 async def run_graph(df: pd.DataFrame) -> pd.DataFrame:
     """Process each row in *df* through the job graph.
 
-    Returns the same DataFrame with additional columns populated.
+    Returns the same DataFrame with additional columns populated
+    (match metadata plus a heuristic ``summary``/``preview`` for the viewer).
     """
     from .graph import create_job_graph  # re-import to avoid circular top-level import
+    from .summary import preview_text, summarize
 
     graph = create_job_graph()
 
@@ -53,6 +80,13 @@ async def run_graph(df: pd.DataFrame) -> pd.DataFrame:
             df.loc[i, "job_type"] = response.get("job_type")
             df.loc[i, "salary_min"] = response.get("salary_min")
             df.loc[i, "salary_max"] = response.get("salary_max")
+
+            # Heuristic summary so the viewer can show content without a
+            # second fetch on hover (free, instant, offline).
+            desc = response.get("job_description") or ""
+            if desc:
+                df.loc[i, "summary"] = summarize(desc)
+                df.loc[i, "preview"] = preview_text(desc)
 
         except Exception as exc:  # noqa: BLE001 — log and continue
             logger.error("Error processing row %d (%s): %s", i, row.get("job_url"), exc)
@@ -92,8 +126,21 @@ async def main_pipeline(
     urls: list[str] | None = None,
     max_pages: int = 10,
     skip_prompt: bool = False,
+    progress=None,
 ) -> str:
-    """Run the full job-search pipeline and return path to output CSV."""
+    """Run the full job-search pipeline and return path to output CSV.
+
+    ``progress`` is an optional ``callable(str)`` used by the web UI to show
+    live status; it is ignored on the CLI path.
+    """
+
+    def say(msg: str) -> None:
+        print(msg)
+        if progress:
+            try:
+                progress(msg)
+            except Exception:  # noqa: BLE001 — progress must never break the run
+                pass
 
     _ensure_cache_dir()
 
@@ -101,9 +148,12 @@ async def main_pipeline(
     from .linkedin_scraper import scrape_linkedin_job_urls
 
     url_list = urls if urls is not None else LINKEDIN_URLS
-    print("Scraping LinkedIn job URLs …")
+    say("Scraping LinkedIn job URLs …")
     df_new_jobs = scrape_linkedin_job_urls(url_list, max_pages=max_pages)
     df_new_jobs = df_new_jobs.drop_duplicates()
+
+    # Mirror everything we saw into the viewer DB (even if screening fails).
+    _db_upsert_seen(df_new_jobs["job_url"].astype(str).tolist())
 
     # 2. Filter out already-processed jobs.
     df_prior = _load_prior_jobs()
@@ -115,7 +165,7 @@ async def main_pipeline(
         df_new_filtered = df_new_jobs.reset_index(drop=True)
         merged = df_new_jobs.copy()
 
-    print(f"New jobs detected: {len(df_new_filtered)}")
+    say(f"New jobs detected: {len(df_new_filtered)}")
 
     # 3. Ask user to confirm (unless --skip-prompt).
     if not skip_prompt and len(df_new_filtered) > 0:
@@ -126,22 +176,22 @@ async def main_pipeline(
 
     # 4. Run the graph on new jobs.
     if len(df_new_filtered) == 0:
-        print("No new jobs to process.")
+        say("No new jobs to process.")
         return ""
 
     # Add empty columns so downstream code works regardless of graph output shape.
-    for col in ("thread_id", "id_run", "is_match", "company_name", "job_title", "job_type", "salary_min", "salary_max"):
+    for col in ("thread_id", "id_run", "is_match", "company_name", "job_title", "job_type", "salary_min", "salary_max", "summary", "preview"):
         if col not in df_new_filtered.columns:
             df_new_filtered[col] = pd.NA
 
-    print("Running job graph …")
+    say("Running job graph …")
     df_results = await run_graph(df_new_filtered)
 
     # 5. Filter matches and exclude unwanted companies.
     percent_matches = round(
         (df_results["is_match"].sum() / len(df_new_filtered)) * 100, 1
     )
-    print(f"\nPercent matches: {percent_matches}%")
+    say(f"\nPercent matches: {percent_matches}%")
 
     df_matches = df_results[df_results["is_match"] == True]  # noqa: E712 — bool column comparison
     if EXCLUDED_COMPANIES:
@@ -150,9 +200,12 @@ async def main_pipeline(
         df_matches = df_matches[mask].reset_index(drop=True)
 
     _save_prior_jobs(merged)
+    # Screened rows (matches AND non-matches) go to the DB so the viewer can
+    # show the full picture, not just the winners.
+    _db_upsert_results(df_results.to_dict("records"))
     output_path = RESULTS_CSV
     df_matches.to_csv(output_path, index=False)
-    print(f"Results written to {output_path}")
+    say(f"Results written to {output_path}")
 
     return output_path
 

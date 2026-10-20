@@ -30,9 +30,35 @@ main.py                      # Top-level entry point (runs pipeline)
 # 2. Configure credentials
 cp .env.example .env   # then fill in your LinkedIn email/password and OpenAI key
 
-# 3. Run the job search pipeline
-./run.sh            # interactive (prompts for confirmation)
-python -m agents.job_finder --skip-prompt   # non-interactive
+# 3a. Interactive viewer (recommended): browse results, filter, hover-preview,
+#     export, and trigger new scans from the browser
+uv run python -m agents.web      # → http://127.0.0.1:8734
+
+# 3b. Or run the pipeline headless from the CLI
+./run.sh                                   # interactive (prompts for confirmation)
+python -m agents.job_finder --skip-prompt  # non-interactive
+```
+
+## Web viewer (`agents/web.py`)
+
+A local FastAPI app + single-page viewer over a SQLite job database
+(`cache/jobs.db`, auto-merged from the legacy CSVs on first start):
+
+- **▶ Run new scan** — triggers the scrape→screen pipeline with a live log.
+- **Browse & filter** — status badges, company/type dropdowns, free-text
+  search, min-salary, sorting.
+- **Hover preview** — hovering a card fetches + summarizes the listing once
+  (cached in the DB); pipeline runs also store a summary at screen time.
+- **Click-through drawer** — prev/next (`j`/`k`, arrows), summary, full text,
+  open the original URL.
+- **Export** — CSV or Markdown of the filtered set, summaries included.
+
+The server binds `127.0.0.1` only — it can launch a run that uses your
+LinkedIn credentials, so keep it off the network. Override with
+`JOB_VIEWER_HOST`/`JOB_VIEWER_PORT` if you know what you're doing.
+
+```bash
+uv run pytest tests -q   # test suite (db, summarizer, API)
 ```
 
 ## Configuration
