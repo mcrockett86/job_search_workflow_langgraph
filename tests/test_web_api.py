@@ -82,9 +82,23 @@ def test_export_csv_and_md(client):
 def test_run_requires_credentials(client, monkeypatch):
     monkeypatch.delenv("LINKEDIN_EMAIL", raising=False)
     monkeypatch.delenv("LINKEDIN_PASSWORD", raising=False)
+    monkeypatch.delenv("LINKEDIN_PROFILE_DIR", raising=False)
     r = client.post("/api/run")
     assert r.status_code == 400
     assert "LINKEDIN_EMAIL" in r.json()["detail"]
+    assert "linkedin_login" in r.json()["detail"]  # points at passwordless path
+
+
+def test_run_accepts_persistent_profile_without_password(client, monkeypatch):
+    """A signed-in profile dir satisfies the auth gate — no password env vars."""
+    from agents import web as web_mod
+    monkeypatch.delenv("LINKEDIN_EMAIL", raising=False)
+    monkeypatch.delenv("LINKEDIN_PASSWORD", raising=False)
+    monkeypatch.setenv("LINKEDIN_PROFILE_DIR", "/tmp/js_test_profile")
+    monkeypatch.setattr("agents.web._run_pipeline_in_thread", lambda: None)
+    r = client.post("/api/run")
+    assert r.status_code == 200
+    web_mod.run_state.running = False  # don't leak the lock into other tests
 
 
 def test_run_status_shape(client):

@@ -31,8 +31,41 @@ _PAGE_LOAD_WAIT_SECONDS = 10
 
 _RETRY_ATTEMPTS = 2
 
+# Persistent Chrome profile used for passwordless scraping: a human signs in
+# once via `python -m agents.linkedin_login`, and the saved session cookies
+# do the rest. The tool never sees or stores the password.
+DEFAULT_PROFILE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "cache", "linkedin_profile")
 
-def _setup_driver(headless: bool | None = None) -> ChromeWebDriver:
+# URL fragments that mean "this browser is NOT logged in".
+_LOGGED_OUT_MARKERS = ("/login", "/authwall", "/checkpoint", "/uas/",
+                       "/session-redirect")
+
+
+def profile_dir_from_env() -> str | None:
+    """Directory holding the persistent Chrome profile, when profile mode is on."""
+    d = os.environ.get("LINKEDIN_PROFILE_DIR")
+    return os.path.abspath(d) if d else None
+
+
+def is_logged_out_url(url: str) -> bool:
+    u = (url or "").lower()
+    return any(m in u for m in _LOGGED_OUT_MARKERS)
+
+
+def session_valid(driver: "ChromeWebDriver") -> bool:
+    """True when the profile still holds a live LinkedIn session."""
+    try:
+        driver.get("https://www.linkedin.com/feed/")
+        time.sleep(3)
+        return not is_logged_out_url(driver.current_url)
+    except Exception:  # noqa: BLE001 — any navigation failure = unusable session
+        return False
+
+
+def _setup_driver(headless: bool | None = None,
+                  profile_dir: str | None = None) -> ChromeWebDriver:
     """Create and configure a Chrome WebDriver.
 
     Parameters
@@ -41,6 +74,10 @@ def _setup_driver(headless: bool | None = None) -> ChromeWebDriver:
         * True  — run in headless mode (browser window hidden).
         * False — show the browser window (interactive login supported).
         * None  — use ``LINKEDIN_HEADLESS`` env var (default: **False** for interactive login).
+    profile_dir : str or None
+        Persistent Chrome profile directory. When set, a session signed in
+        once via ``python -m agents.linkedin_login`` is reused by every
+        later scrape — no password involved.
     """
     if headless is None:
         # Default to non-headless so users can see and interact with LinkedIn's login page.
@@ -49,6 +86,11 @@ def _setup_driver(headless: bool | None = None) -> ChromeWebDriver:
     options = ChromeOptions()
     if headless:
         options.add_argument("--headless=new")
+    if profile_dir:
+        os.makedirs(profile_dir, exist_ok=True)
+        options.add_argument(f"--user-data-dir={profile_dir}")
+    else:
+        options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     # Improve compatibility with LinkedIn's anti-bot detection.
@@ -122,6 +164,30 @@ def _login(driver: "WebDriver", email: str, password: str) -> None:
         )
 
 
+def interactive_login(driver: "ChromeWebDriver", timeout: int = 300) -> bool:
+    """Open LinkedIn and let a human sign in in the visible browser window.
+
+    The tool never handles the password: the user types it into LinkedIn
+    themselves, and the persistent profile keeps the resulting session
+    cookies. Returns True once the browser lands on a logged-in page.
+    """
+    driver.get("https://www.linkedin.com/login")
+    print("\n  A browser window is open on LinkedIn's sign-in page.\n"
+          "  Sign in there yourself (password, passkey, or 2FA) — this tool\n"
+          f"  never sees your password. Waiting up to {timeout}s…\n",
+          flush=True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if not is_logged_out_url(driver.current_url):
+                time.sleep(2)  # let the session cookies settle
+                return True
+        except Exception:  # noqa: BLE001 — window closed mid-login
+            return False
+        time.sleep(2)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -180,7 +246,52 @@ def scrape_linkedin_job_urls(
         List of LinkedIn search/collection URLs to scrape.
     max_pages : int
         Maximum number of pagination pages per URL.
+
+    Auth resolution (first match wins):
+      1. ``LINKEDIN_PROFILE_DIR`` set and its session still valid → reuse the
+         signed-in profile. No password involved.
+      2. ``LINKEDIN_EMAIL`` / ``LINKEDIN_PASSWORD`` env vars → automated
+         fill (legacy path).
+      3. Neither → open a visible browser and wait for the user to sign in
+         themselves into the persistent profile.
     """
+    profile_dir = profile_dir_from_env()
+    have_creds = bool(os.environ.get("LINKEDIN_EMAIL")
+                      and os.environ.get("LINKEDIN_PASSWORD"))
+
+    if profile_dir:
+        if headless is None:
+            headless = os.environ.get(
+                "LINKEDIN_HEADLESS", "false").lower() in ("1", "true", "yes")
+        driver = _setup_driver(headless=headless, profile_dir=profile_dir)
+        try:
+            if not session_valid(driver):
+                if headless and have_creds:
+                    logger.warning(
+                        "Saved LinkedIn profile session is not valid; "
+                        "re-filling login from LINKEDIN_EMAIL/LINKEDIN_PASSWORD "
+                        "(this also refreshes the saved profile).")
+                    _login(driver, os.environ["LINKEDIN_EMAIL"],
+                           os.environ["LINKEDIN_PASSWORD"])
+                else:
+                    if headless:
+                        raise RuntimeError(
+                            "LinkedIn session in the saved profile is not valid. "
+                            "Re-authenticate once with `python -m agents.linkedin_login` "
+                            "(or clear LINKEDIN_PROFILE_DIR to use password mode)."
+                        )
+                    if not interactive_login(driver):
+                        raise RuntimeError(
+                            "No LinkedIn sign-in completed — Run aborted. "
+                            "Nothing was scraped."
+                        )
+            seen_urls = _scrape_urls(driver, target_jobs_urls, max_pages)
+            cleaned = [u.split("/?")[0] for u in seen_urls]
+            return pd.DataFrame({"job_url": cleaned})
+        finally:
+            driver.quit()
+        # (unreachable) profile branch returns or raises above
+
     email = os.environ.get("LINKEDIN_EMAIL") or input("Enter your LinkedIn email: ")
     password = os.environ.get("LINKEDIN_PASSWORD") or input("Enter your LinkedIn password: ")
 
@@ -189,39 +300,7 @@ def scrape_linkedin_job_urls(
     try:
         # Login once — subsequent URLs stay logged in.
         _login(driver, email, password)
-
-        seen_urls: set[str] = set()
-        for url_idx, target_url in enumerate(target_jobs_urls):
-            logger.info("Scraping URL %d/%d …", url_idx + 1, len(target_jobs_urls))
-            driver.get(target_url)
-            time.sleep(_PAGE_LOAD_WAIT_SECONDS)
-
-            page_number = 1
-            while page_number <= max_pages:
-                print(f"Scraping page {page_number}…")
-
-                # Retry up to _RETRY_ATTEMPTS times on transient failures.
-                for attempt in range(1, _RETRY_ATTEMPTS + 1):
-                    try:
-                        urls_on_page = _scrape_page(driver, page_number)
-                        before = len(seen_urls)
-                        seen_urls.update(urls_on_page)
-                        new_count = len(seen_urls) - before
-                        if new_count:
-                            print(f"  → found {new_count} new job URLs")
-                        break  # success — exit retry loop
-                    except Exception as exc:
-                        logger.warning(
-                            "Scrape attempt %d failed (page %d): %s",
-                            attempt, page_number, exc,
-                        )
-                        if attempt == _RETRY_ATTEMPTS:
-                            raise
-
-                if not _go_to_next_page(driver, page_number):
-                    break
-                page_number += 1
-
+        seen_urls = _scrape_urls(driver, target_jobs_urls, max_pages)
     finally:
         driver.quit()
 
@@ -229,3 +308,40 @@ def scrape_linkedin_job_urls(
     # https->http here, which produced broken click-out links in the viewer.
     cleaned = [u.split("/?")[0] for u in seen_urls]
     return pd.DataFrame({"job_url": cleaned})
+
+
+def _scrape_urls(driver: "ChromeWebDriver", target_jobs_urls: list[str],
+                 max_pages: int) -> set[str]:
+    """Collect job URLs across all target search URLs (driver must be logged in)."""
+    seen_urls: set[str] = set()
+    for url_idx, target_url in enumerate(target_jobs_urls):
+        logger.info("Scraping URL %d/%d …", url_idx + 1, len(target_jobs_urls))
+        driver.get(target_url)
+        time.sleep(_PAGE_LOAD_WAIT_SECONDS)
+
+        page_number = 1
+        while page_number <= max_pages:
+            print(f"Scraping page {page_number}…")
+
+            # Retry up to _RETRY_ATTEMPTS times on transient failures.
+            for attempt in range(1, _RETRY_ATTEMPTS + 1):
+                try:
+                    urls_on_page = _scrape_page(driver, page_number)
+                    before = len(seen_urls)
+                    seen_urls.update(urls_on_page)
+                    new_count = len(seen_urls) - before
+                    if new_count:
+                        print(f"  → found {new_count} new job URLs")
+                    break  # success — exit retry loop
+                except Exception as exc:
+                    logger.warning(
+                        "Scrape attempt %d failed (page %d): %s",
+                        attempt, page_number, exc,
+                    )
+                    if attempt == _RETRY_ATTEMPTS:
+                        raise
+
+            if not _go_to_next_page(driver, page_number):
+                break
+            page_number += 1
+    return seen_urls

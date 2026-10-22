@@ -97,6 +97,30 @@ service behind `job-search.blueskyengineering.net`:
 - **DNS**: needs an `A` record `job-search` → the VPS IP before Caddy can
   issue the certificate.
 
+## LinkedIn login — passwordless (recommended)
+
+Sign in **once** into a persistent browser profile; the tool never sees or
+stores your password (you type it into LinkedIn's own page, or use a
+passkey/2FA). Every later "Run new scan" reuses the saved session:
+
+```bash
+uv run python -m agents.linkedin_login           # opens a browser, sign in there
+uv run python -m agents.linkedin_login --status  # check the saved session
+uv run python -m agents.linkedin_login --reset   # wipe it
+```
+
+Then set `LINKEDIN_PROFILE_DIR` (default location: `cache/linkedin_profile`).
+On the VPS the profile lives in the `job_search_cache` volume — sign in once:
+
+```bash
+docker compose exec -T job_search xvfb-run -a python -m agents.linkedin_login
+```
+
+### Legacy: password env vars
+
+`LINKEDIN_EMAIL` + `LINKEDIN_PASSWORD` still work (automated fill), but
+prefer the profile — no password in any `.env`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and set:

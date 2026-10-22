@@ -15,9 +15,12 @@ FROM python:3.13-slim
 # matching driver for its chromium; Selenium Manager honours CHROME_BINARY /
 # CHROMEDRIVER_PATH below and will not try to download anything.
 # fonts-liberation: pages render with real fonts (screenshots/preview fetches).
+# xvfb: `docker compose exec -T job_search xvfb-run -a python -m
+# agents.linkedin_login` opens a real (virtual) browser for the one-time
+# passwordless sign-in; the saved profile then serves every later scrape.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       chromium chromium-driver fonts-liberation curl ca-certificates \
+       chromium chromium-driver fonts-liberation curl ca-certificates xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CHROME_BINARY=/usr/bin/chromium \
