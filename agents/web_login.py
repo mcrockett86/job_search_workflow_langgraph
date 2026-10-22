@@ -231,18 +231,15 @@ def _apply(action: str, payload: dict, driver) -> None:
         password = payload.get("password") or ""
         if not email or not password:
             raise ValueError("Both email and password are required.")
-        e = driver.find_element(By.CSS_SELECTOR, "input[type='email']")
-        p = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        e.clear(); e.send_keys(email)
-        p.clear(); p.send_keys(password)
-        # The password lives only in these two locals; nothing else keeps it.
+        from . import linkedin_scraper as ls
+        # LinkedIn's DOM has hidden duplicate inputs first — resolve visible.
+        e = ls.find_visible(driver, ls.EMAIL_SELECTORS, "email")
+        p = ls.find_visible(driver, ls.PASSWORD_SELECTORS, "password")
+        ls.focus_type(driver, e, email)
+        ls.focus_type(driver, p, password)
+        # The password lives only in these locals; nothing else keeps it.
         del password
-        try:
-            btn = driver.find_element(
-                By.XPATH, "//span[normalize-space()='Sign in']/ancestor::button")
-        except Exception:  # noqa: BLE001 — fall back to a generic submit
-            btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
-        btn.click()
+        ls.click_sign_in(driver)
 
     elif action == "text":
         text = payload.get("text") or ""
