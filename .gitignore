@@ -214,3 +214,6 @@ results_output.csv
 .DS_Store
 agents/tools/resources/resume_*backup*.pdf
 cache/jobs.db
+
+# per-user settings uploaded through the web UI (resume.pdf, search_urls.txt)
+user_config/

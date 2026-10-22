@@ -28,10 +28,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
-from . import db
+from . import db, user_config
 from .summary import guess_title_company, preview_text, summarize
 
 logger = logging.getLogger(__name__)
@@ -268,6 +269,48 @@ def _salary_str(r: dict[str, Any]) -> str:
     if lo or hi:
         return f"${(lo or hi):,.0f}"
     return "—"
+
+
+# ---------------------------------------------------------------------------
+# Search configuration (resume + URLs)
+# ---------------------------------------------------------------------------
+class UrlsIn(BaseModel):
+    urls: list[str]
+
+
+@app.get("/api/config")
+def api_config() -> JSONResponse:
+    """Current resume + search-URL configuration (custom vs defaults)."""
+    return JSONResponse(user_config.status())
+
+
+@app.post("/api/config/resume")
+async def api_config_resume(file: UploadFile = File(...)) -> JSONResponse:
+    """Upload a resume PDF; cached to user_config/resume.pdf (overwrites)."""
+    data = await file.read()
+    try:
+        meta = user_config.save_resume_pdf(data, file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    meta.pop("path", None)
+    return JSONResponse({"ok": True, "resume": meta})
+
+
+@app.post("/api/config/urls")
+def api_config_urls(body: UrlsIn) -> JSONResponse:
+    """Save the search-URL list (one per line in the textarea); overwrites."""
+    try:
+        n = user_config.save_urls(body.urls)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"ok": True, "saved": n})
+
+
+@app.post("/api/config/reset")
+def api_config_reset(which: str = Query("all", pattern="^(resume|urls|all)$")) -> JSONResponse:
+    """Delete cached user files and fall back to the bundled defaults."""
+    items = user_config.reset(which)
+    return JSONResponse({"ok": True, "reset": items})
 
 
 # ---------------------------------------------------------------------------
