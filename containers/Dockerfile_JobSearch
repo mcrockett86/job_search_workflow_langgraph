@@ -1,0 +1,49 @@
+# Job-search viewer (VPS). Build context = repo root:
+#   docker build -f containers/Dockerfile_JobSearch .
+#
+# The web viewer + pipeline runner (agents.web, FastAPI on 7867) runs in this
+# container. The "Run new scan" button drives a headless Selenium/Chromium
+# LinkedIn scrape in-container — hence chromium + chromedriver baked in.
+#
+# Auth is NOT this container's job: Caddy fronts the site with basic_auth
+# (JOB_SEARCH_USER / JOB_SEARCH_BASIC_AUTH_HASH from the stack .env), and the
+# container publishes no port — Caddy reaches it by service name on the
+# compose network, so it is never exposed on the public interface.
+FROM python:3.13-slim
+
+# chromium + chromium-driver: the LinkedIn scraper (selenium). Debian ships a
+# matching driver for its chromium; Selenium Manager honours CHROME_BINARY /
+# CHROMEDRIVER_PATH below and will not try to download anything.
+# fonts-liberation: pages render with real fonts (screenshots/preview fetches).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       chromium chromium-driver fonts-liberation curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CHROME_BINARY=/usr/bin/chromium \
+    CHROMEDRIVER_PATH=/usr/bin/chromedriver \
+    SE_AVOID_BROWSER_DOWNLOAD=1 \
+    PYTHONUNBUFFERED=1 \
+    JOB_VIEWER_HOST=0.0.0.0 \
+    JOB_VIEWER_PORT=7867 \
+    LINKEDIN_HEADLESS=true \
+    TZ=America/Los_Angeles
+
+WORKDIR /app
+
+# uv reads [project].dependencies straight from pyproject.toml — one source of
+# truth, no hand-maintained requirements.txt to drift.
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system -r pyproject.toml \
+    && pip uninstall -y uv || true
+
+COPY . /app
+
+# State that must survive redeploys lives in named volumes (see hostinger
+# docker-compose.yml): cache/ (jobs.db) and user_config/ (uploaded resume +
+# saved search URLs).
+VOLUME ["/app/cache", "/app/user_config"]
+
+EXPOSE 7867
+CMD ["python", "-m", "agents.web"]

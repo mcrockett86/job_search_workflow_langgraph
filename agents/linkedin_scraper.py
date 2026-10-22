@@ -56,12 +56,20 @@ def _setup_driver(headless: bool | None = None) -> ChromeWebDriver:
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
+    # Container deployments bake chromium + chromedriver into the image and
+    # point these env vars at them; otherwise Selenium Manager resolves (and
+    # may download) the pair automatically on a desktop machine.
+    chrome_binary = os.environ.get("CHROME_BINARY")
+    if chrome_binary:
+        options.binary_location = chrome_binary
+
     # Strip proxy env vars that can cause 502 tunnel errors.
     for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                 "http_proxy", "https_proxy", "all_proxy"):
         os.environ.pop(var, None)
 
-    service = Service()  # webdriver_manager resolves automatically
+    driver_path = os.environ.get("CHROMEDRIVER_PATH") or None
+    service = Service(executable_path=driver_path) if driver_path else Service()
     return ChromeWebDriver(service=service, options=options)
 
 

@@ -1,0 +1,32 @@
+# Keep the build context lean and secrets out of the image.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+.pytest_cache
+.DS_Store
+*.pyc
+
+# NEVER bake local credential files into an image — the VPS stack injects
+# LINKEDIN_EMAIL / LINKEDIN_PASSWORD / OPENAI_API_KEY via compose environment.
+.env
+.env.*
+dotenv.env
+dotenv_example.env
+
+# runtime state (mounted as volumes in production)
+cache/
+user_config/
+results_output.csv
+
+# personal resume backups — never ship in a shared image
+agents/tools/resources/resume_*backup*.pdf
+
+# repo noise
+demo.gif
+job_graph.png
+docs/
+tests/
+uv.lock
