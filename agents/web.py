@@ -32,7 +32,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import db, profiles, user_config
+from . import db, profiles, user_config, web_login
 from .summary import guess_title_company, preview_text, summarize
 
 logger = logging.getLogger(__name__)
@@ -181,21 +181,22 @@ def api_facets() -> JSONResponse:
 def api_run() -> JSONResponse:
     if run_state.running:
         raise HTTPException(status_code=409, detail="A run is already in progress")
-    # Auth resolution mirrors linkedin_scraper: a persistent profile (no
-    # password anywhere) satisfies the gate just as well as env credentials.
+    # Auth resolution: env credentials OR a saved per-profile LinkedIn
+    # session (created via the viewer's 🔑 sign-in button or linkedin_login)
+    # satisfy the gate. The scraper re-validates the session at run time.
     from . import linkedin_scraper  # lazy: keeps selenium off the import path
-    if not linkedin_scraper.profile_dir_from_env():
-        missing = [v for v in ("LINKEDIN_EMAIL", "LINKEDIN_PASSWORD") if not os.environ.get(v)]
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Missing LinkedIn auth: {', '.join(missing)} unset and no "
-                    "LINKEDIN_PROFILE_DIR set. Recommended: sign in once with "
-                    "`python -m agents.linkedin_login` (passwordless profile) "
-                    "and set LINKEDIN_PROFILE_DIR."
-                ),
-            )
+    have_creds = bool(os.environ.get("LINKEDIN_EMAIL")
+                      and os.environ.get("LINKEDIN_PASSWORD"))
+    if not have_creds and not linkedin_scraper.has_saved_session():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "LinkedIn is not signed in for this profile yet. Click "
+                "“🔑 LinkedIn sign-in” in the toolbar and complete the login "
+                "in the relayed browser — the session is saved for this "
+                "profile only."
+            ),
+        )
     run_profile = profiles.current_slug()
     with run_state.lock:
         if run_state.running:
@@ -320,6 +321,95 @@ def _salary_str(r: dict[str, Any]) -> str:
     if lo or hi:
         return f"${(lo or hi):,.0f}"
     return "—"
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn sign-in through the browser (per search profile)
+#
+# The VPS has no screen, so the viewer relays a real LinkedIn login page:
+# screenshots stream to the client, keystrokes/clicks go back. The password
+# is typed into LinkedIn's own form in-memory and never stored, logged, or
+# echoed. Only the resulting session cookies persist (in the profile's
+# Chrome dir inside the cache volume).
+# ---------------------------------------------------------------------------
+class LoginCreds(BaseModel):
+    email: str
+    password: str
+
+
+class LoginText(BaseModel):
+    text: str
+
+
+class LoginKeys(BaseModel):
+    key: str = "Enter"
+
+
+class LoginClick(BaseModel):
+    x: int
+    y: int
+
+
+def _login_slug() -> str:
+    return profiles.current_slug()
+
+
+@app.get("/api/login/status")
+def api_login_status() -> JSONResponse:
+    """Live state of this profile's sign-in session (screenshot + status)."""
+    sess = web_login.get(_login_slug())
+    if sess is None:
+        return JSONResponse({"active": False})
+    snap = sess.snapshot()
+    return JSONResponse({"active": True, **snap})
+
+
+@app.post("/api/login/start")
+def api_login_start() -> JSONResponse:
+    """Open a LinkedIn sign-in browser for the selected profile."""
+    p = profiles.current()
+    p.ensure_dirs()
+    sess = web_login.start(p.slug, p.linkedin_profile_dir)
+    return JSONResponse({"ok": True, "profile": p.slug, **sess.snapshot()})
+
+
+@app.post("/api/login/credentials")
+def api_login_credentials(body: LoginCreds) -> JSONResponse:
+    """Type email+password into LinkedIn's login form (never stored/logged)."""
+    sess = web_login.enqueue(_login_slug(), "credentials",
+                             {"email": body.email, "password": body.password})
+    if sess is None:
+        raise HTTPException(status_code=409, detail="No active sign-in session")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/login/text")
+def api_login_text(body: LoginText) -> JSONResponse:
+    sess = web_login.enqueue(_login_slug(), "text", {"text": body.text})
+    if sess is None:
+        raise HTTPException(status_code=409, detail="No active sign-in session")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/login/keys")
+def api_login_keys(body: LoginKeys) -> JSONResponse:
+    sess = web_login.enqueue(_login_slug(), "keys", {"key": body.key})
+    if sess is None:
+        raise HTTPException(status_code=409, detail="No active sign-in session")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/login/click")
+def api_login_click(body: LoginClick) -> JSONResponse:
+    sess = web_login.enqueue(_login_slug(), "click", {"x": body.x, "y": body.y})
+    if sess is None:
+        raise HTTPException(status_code=409, detail="No active sign-in session")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/login/cancel")
+def api_login_cancel() -> JSONResponse:
+    return JSONResponse({"ok": web_login.cancel(_login_slug())})
 
 
 # ---------------------------------------------------------------------------

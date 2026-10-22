@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     profile = os.path.abspath(
-        args.profile_dir or ls.profile_dir_from_env() or ls.DEFAULT_PROFILE_DIR)
+        args.profile_dir or ls.linkedin_profile_dir())
 
     if args.reset:
         shutil.rmtree(profile, ignore_errors=True)

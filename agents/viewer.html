@@ -71,6 +71,21 @@
   /* --- search settings modal --- */
   #cfgmodal { position: fixed; inset: 0; z-index: 50; display: none;
               background: rgba(15,23,42,.45); }
+  /* --- LinkedIn sign-in modal (shares the settings panel look) --- */
+  #loginmodal { position: fixed; inset: 0; z-index: 50; display: none;
+                background: rgba(15,23,42,.45); }
+  #loginmodal .panel { position: absolute; right: 0; top: 0; bottom: 0;
+                       width: min(680px, 96vw); background: #fff; padding: 22px 24px;
+                       overflow-y: auto; box-shadow: -8px 0 30px rgba(15,23,42,.25); }
+  #loginmodal h2 { margin-bottom: 2px; padding-right: 90px; }
+  #loginmodal .close { position: absolute; top: 16px; right: 18px; }
+  #loginmodal .sec { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e2e8f0; }
+  #loginmodal .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 10px; }
+  #loginmodal .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  #loginmodal input { padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; }
+  #login-shot-wrap { margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 10px;
+                     overflow: hidden; background: #0f172a; display: none; }
+  #login-shot { display: block; width: 100%; height: auto; cursor: crosshair; }
   #cfgmodal .panel { position: absolute; right: 0; top: 0; bottom: 0;
                      width: min(560px, 94vw); background: #fff; padding: 22px 24px;
                      overflow-y: auto; box-shadow: -8px 0 30px rgba(15,23,42,.25); }
@@ -115,6 +130,7 @@
     </select>
     <button class="secondary" id="export-csv">Export CSV</button>
     <button class="secondary" id="export-md">Export MD</button>
+    <button class="secondary" id="loginbtn" title="Sign LinkedIn into this profile (session saved; password never stored)">🔑 LinkedIn sign-in</button>
     <button class="secondary" id="cfgbtn" title="Set your resume and job-search URLs">⚙ Search settings</button>
   </div>
   <div id="runlog"></div>
@@ -168,6 +184,36 @@
   </div>
 
   <div class="msg" id="cfg-msg"></div>
+</div></div>
+
+<div id="loginmodal"><div class="panel">
+  <button class="close secondary" id="login-close">✕ close</button>
+  <h2>LinkedIn sign-in</h2>
+  <div class="hint">A real LinkedIn page is open on the server. You type your
+    credentials into the form below and we type them into <b>LinkedIn's own
+    page</b> — they are never stored, logged, or sent anywhere else. Only the
+    resulting session cookies are saved, for profile
+    <b id="login-prof">?</b> — future scans run without any password.</div>
+  <div id="login-shot-wrap"><img id="login-shot" alt="LinkedIn sign-in page" width="1280" height="900"></div>
+  <div class="hint" id="login-status">not started</div>
+  <div class="sec">
+    <b>Sign in</b>
+    <div class="row">
+      <input type="email" id="login-email" placeholder="LinkedIn email" autocomplete="username" style="flex:1 1 200px">
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" style="flex:1 1 200px">
+      <button id="login-submit">Sign in on LinkedIn</button>
+    </div>
+    <div class="hint">2FA or a challenge on the page? Click the picture to focus the field, then type below:</div>
+    <div class="row">
+      <input type="text" id="login-extra" placeholder="type into the page (codes, text…)" style="flex:1 1 220px">
+      <button class="secondary" id="login-send">Send</button>
+      <button class="secondary" id="login-enter">⏎ Enter</button>
+    </div>
+    <div class="row">
+      <button class="secondary" id="login-cancel">Cancel sign-in</button>
+    </div>
+  </div>
+  <div class="msg" id="login-msg"></div>
 </div></div>
 <script>
 const $ = (s) => document.querySelector(s);
@@ -445,6 +491,96 @@ async function cfgReset(which, label) {
 }
 $('#cfg-resume-reset').onclick = () => cfgReset('resume', 'Resume');
 $('#cfg-urls-reset').onclick = () => cfgReset('urls', 'URLs');
+
+// ---- LinkedIn sign-in relay --------------------------------------------------
+let loginTimer = null;
+function loginMsg(text, ok) {
+  const m = $('#login-msg');
+  m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err');
+}
+async function loginPost(path, body) {
+  const r = await fetch(purl(path), body
+    ? { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body) }
+    : { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { loginMsg(d.detail || 'Request failed.', false); return null; }
+  return d;
+}
+async function pollLogin() {
+  const r = await fetch(purl('/api/login/status'));
+  if (!r.ok) return;
+  const d = await r.json();
+  if (!d.active) {
+    $('#login-status').textContent = 'not started';
+    $('#login-shot-wrap').style.display = 'none';
+    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+    return;
+  }
+  $('#login-status').textContent = `${d.message}  ·  page: ${d.url_host || '…'}  ·  ${d.elapsed}s`;
+  if (d.screenshot) {
+    $('#login-shot-wrap').style.display = 'block';
+    $('#login-shot').src = 'data:image/png;base64,' + d.screenshot;
+  }
+  if (d.status === 'success') {
+    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+    loginMsg('Signed in for ' + prof() + ' — you can close this and hit ▶ Run new scan.', true);
+    $('#login-email').value = ''; $('#login-password').value = '';
+    $('#login-extra').value = '';
+  } else if (d.status === 'failed' || d.status === 'cancelled') {
+    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+    loginMsg(d.message, false);
+  }
+}
+$('#loginbtn').onclick = async () => {
+  $('#loginmodal').style.display = 'block';
+  $('#login-prof').textContent = prof();
+  $('#login-msg').textContent = '';
+  const d = await loginPost('/api/login/start');
+  if (!d) return;
+  if (loginTimer) clearInterval(loginTimer);
+  loginTimer = setInterval(pollLogin, 1500);
+  pollLogin();
+};
+$('#login-close').onclick = () => {
+  $('#loginmodal').style.display = 'none';   // session keeps running server-side
+};
+$('#loginmodal').addEventListener('click', (e) => {
+  if (e.target.id === 'loginmodal') $('#loginmodal').style.display = 'none';
+});
+$('#login-submit').onclick = async () => {
+  const email = $('#login-email').value.trim();
+  const password = $('#login-password').value;
+  if (!email || !password) return loginMsg('Enter both email and password.', false);
+  if (await loginPost('/api/login/credentials', { email, password })) {
+    $('#login-password').value = '';         // wipe from the DOM immediately
+    loginMsg('Typed into LinkedIn — watch the picture above.', true);
+    setTimeout(pollLogin, 800);
+  }
+};
+$('#login-send').onclick = async () => {
+  const text = $('#login-extra').value;
+  if (!text) return;
+  if (await loginPost('/api/login/text', { text })) {
+    $('#login-extra').value = '';
+    setTimeout(pollLogin, 600);
+  }
+};
+$('#login-enter').onclick = async () => {
+  if (await loginPost('/api/login/keys', { key: 'Enter' })) setTimeout(pollLogin, 600);
+};
+$('#login-cancel').onclick = async () => {
+  await loginPost('/api/login/cancel');
+  loginMsg('Sign-in cancelled — nothing was saved.', false);
+};
+// Click the relayed page: scale viewport coords to the 1280x900 server window.
+$('#login-shot').onclick = (e) => {
+  const img = $('#login-shot');
+  const rect = img.getBoundingClientRect();
+  const x = Math.round((e.clientX - rect.left) * (1280 / rect.width));
+  const y = Math.round((e.clientY - rect.top) * (900 / rect.height));
+  loginPost('/api/login/click', { x, y }).then(() => setTimeout(pollLogin, 600));
+};
 
 // profile first: every data call carries ?profile=, so the selector,
 // storage, and the visible list must agree before the first paint.

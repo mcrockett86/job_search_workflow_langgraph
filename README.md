@@ -107,22 +107,25 @@ service behind `job-search.blueskyengineering.net`:
 
 ## LinkedIn login — passwordless (recommended)
 
-Sign in **once** into a persistent browser profile; the tool never sees or
-stores your password (you type it into LinkedIn's own page, or use a
-passkey/2FA). Every later "Run new scan" reuses the saved session:
+Click **🔑 LinkedIn sign-in** in the viewer toolbar. A real LinkedIn page
+opens on the server; the modal shows it live and you enter your details —
+they are typed into LinkedIn's own form and never stored, logged, or sent
+anywhere else. Only the resulting session cookies persist, **per search
+profile** (`cache/linkedin_profile/<profile>/`), so mike's LinkedIn account
+is never used for jen's scans. Every later "▶ Run new scan" reuses that
+session with no password involved. Works on the headless VPS as-is.
+
+Same thing from the CLI (opens a visible browser on your machine):
 
 ```bash
-uv run python -m agents.linkedin_login           # opens a browser, sign in there
+uv run python -m agents.linkedin_login           # sign in for the active profile
 uv run python -m agents.linkedin_login --status  # check the saved session
 uv run python -m agents.linkedin_login --reset   # wipe it
 ```
 
-Then set `LINKEDIN_PROFILE_DIR` (default location: `cache/linkedin_profile`).
-On the VPS the profile lives in the `job_search_cache` volume — sign in once:
-
-```bash
-docker compose exec -T job_search xvfb-run -a python -m agents.linkedin_login
-```
+`LINKEDIN_PROFILE_DIR` sets the base directory for those per-profile
+sessions (default `cache/linkedin_profile`); on the VPS it lives inside the
+`job_search_cache` volume, so sessions survive redeploys.
 
 ### Legacy: password env vars
 
