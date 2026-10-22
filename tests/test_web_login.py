@@ -17,9 +17,11 @@ from agents import profiles, web, web_login
 
 
 class FakeElement:
-    def __init__(self):
+    def __init__(self, visible=True):
         self.typed = []
         self.cleared = 0
+        self.clicked = 0
+        self._visible = visible
 
     def clear(self):
         self.cleared += 1
@@ -27,19 +29,38 @@ class FakeElement:
     def send_keys(self, k):
         self.typed.append(k)
 
+    def click(self):
+        self.clicked += 1
+
+    def is_displayed(self):
+        return self._visible
+
+    def is_enabled(self):
+        return True
+
 
 class FakeDriver:
-    """Minimal WebDriver double: records everything the worker does."""
+    """Minimal WebDriver double: records everything the worker does.
+
+    Mirrors LinkedIn's trap: the generic 'input[type=email]' selector finds a
+    HIDDEN duplicate first — only the #username/#password ids are visible.
+    """
 
     def __init__(self, profile_dir):
         self.profile_dir = profile_dir
         self.url = "https://www.linkedin.com/login"
-        self.elements: dict[str, FakeElement] = {}
-        self.clicked_xpaths = []
+        self.elements: dict[tuple, list[FakeElement]] = {}
         self.cdp_events = []
         self.quit_called = False
         self.window = None
         self.active = FakeElement()
+        # the real, visible login form
+        self.email_visible = FakeElement()
+        self.password_visible = FakeElement()
+        self.signin_visible = FakeElement()
+        # hidden decoys that come first in DOM order
+        self.email_hidden = FakeElement(visible=False)
+        self.password_hidden = FakeElement(visible=False)
 
     # navigation / state -----------------------------------------------------
     def set_window_size(self, w, h):
@@ -58,15 +79,26 @@ class FakeDriver:
     def quit(self):
         self.quit_called = True
 
-    # element access -----------------------------------------------------------
-    def find_element(self, by, value):
-        el = self.elements.setdefault(value, FakeElement())
-        if "Sign in" in value:
-            self.clicked_xpaths.append(value)
-        return el
+    def execute_script(self, script, *args):
+        return None
 
-    def switch_to_property(self):
-        return self.active
+    # element access -----------------------------------------------------------
+    def find_elements(self, by, value):
+        if value in ("input[type='email']", "input[autocomplete='username']"):
+            return [self.email_hidden, self.email_visible]
+        if value == "input#username":
+            return [self.email_visible]
+        if value in ("input[type='password']", "input[autocomplete='current-password']"):
+            return [self.password_hidden, self.password_visible]
+        if value in ("input#password", "input[name='session_password']"):
+            return [self.password_visible]
+        if "Sign in" in str(value) or value == "button[type='submit']":
+            return [self.signin_visible]
+        return []
+
+    def find_element(self, by, value):
+        els = self.find_elements(by, value)
+        return els[0] if els else FakeElement()
 
     @property
     def switch_to(self):
@@ -142,20 +174,23 @@ def test_start_opens_login_page_and_streams(env):
     assert snap["url_host"] == "www.linkedin.com"
 
 
-def test_credentials_action_types_and_submits(env):
+def test_credentials_action_fills_visible_fields_and_submits(env):
+    """Regression: LinkedIn's DOM has hidden duplicate inputs first — the
+    relay must type into the VISIBLE ones (this was ElementNotInteractable
+    on the live VPS) and click the visible Sign in button."""
     sess = web_login.start("mike", "/tmp/x/mike")
     _wait_status("mike", "waiting")
     d = env["drivers"][0]
     web_login.enqueue("mike", "credentials",
                       {"email": "a@b.c", "password": "hunter2"})
     deadline = time.time() + 5
-    while time.time() < deadline and not d.clicked_xpaths:
+    while time.time() < deadline and not d.signin_visible.clicked:
         time.sleep(0.05)
-    email_el = d.elements["input[type='email']"]
-    pass_el = d.elements["input[type='password']"]
-    assert email_el.typed == ["a@b.c"]
-    assert pass_el.typed == ["hunter2"]
-    assert d.clicked_xpaths  # Sign in button clicked
+    assert d.email_visible.typed == ["a@b.c"]
+    assert d.password_visible.typed == ["hunter2"]
+    assert d.email_hidden.typed == []      # decoy untouched
+    assert d.password_hidden.typed == []   # decoy untouched
+    assert d.signin_visible.clicked >= 1   # Sign in clicked
 
 
 def test_success_when_url_leaves_login(env):

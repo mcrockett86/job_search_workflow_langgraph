@@ -77,6 +77,89 @@ def is_logged_out_url(url: str) -> bool:
     return any(m in u for m in _LOGGED_OUT_MARKERS)
 
 
+# Selector lists for the login form, most-specific first. LinkedIn's DOM
+# carries HIDDEN duplicate inputs (passkey panel, guest header) ahead of the
+# real ones in DOM order, so never use a bare find_element on these — use
+# find_visible() which skips anything not displayed+enabled.
+EMAIL_SELECTORS = (
+    "input#username",
+    "input[name='session_key']",
+    "input[autocomplete='username']",
+    "input[type='email']",
+)
+PASSWORD_SELECTORS = (
+    "input#password",
+    "input[name='session_password']",
+    "input[autocomplete='current-password']",
+    "input[type='password']",
+)
+
+
+def find_visible(driver, selectors, what: str = "field"):
+    """First *visible & enabled* element matching any selector in order.
+
+    Raises ValueError with a user-readable message when nothing matches
+    (LinkedIn layout change / challenge page).
+    """
+    if isinstance(selectors, str):
+        selectors = (selectors,)
+    for sel in selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+        except Exception:  # noqa: BLE001 — bad selector on some page variants
+            continue
+        for el in els:
+            try:
+                if el.is_displayed() and el.is_enabled():
+                    return el
+            except Exception:  # noqa: BLE001 — stale node, keep scanning
+                continue
+    raise ValueError(
+        f"Could not find the visible {what} field on the page — LinkedIn may "
+        "have changed its layout or shown a challenge.")
+
+
+def focus_type(driver, el, text: str) -> None:
+    """Scroll into view, focus, clear, type (LinkedIn inputs want the click)."""
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        el.click()
+    except Exception:  # noqa: BLE001 — some inputs reject synthetic clicks
+        pass
+    try:
+        el.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    el.send_keys(text)
+
+
+def click_sign_in(driver) -> None:
+    """Click the visible 'Sign in' submit button, JS fallback included."""
+    from selenium.webdriver.common.by import By as _By
+    candidates = []
+    try:
+        candidates = driver.find_elements(
+            _By.XPATH, "//span[normalize-space()='Sign in']/ancestor::button")
+    except Exception:  # noqa: BLE001
+        pass
+    if not candidates:
+        candidates = driver.find_elements(_By.CSS_SELECTOR, "button[type='submit']")
+    for el in candidates:
+        try:
+            if el.is_displayed() and el.is_enabled():
+                try:
+                    el.click()
+                except Exception:  # noqa: BLE001 — overlay intercepted the click
+                    driver.execute_script("arguments[0].click();", el)
+                return
+        except Exception:  # noqa: BLE001
+            continue
+    raise ValueError("Could not find the visible 'Sign in' button on the page.")
+
+
 def session_valid(driver: "ChromeWebDriver") -> bool:
     """True when the profile still holds a live LinkedIn session."""
     try:
@@ -151,16 +234,19 @@ def _login(driver: "WebDriver", email: str, password: str) -> None:
     # Navigate directly to the login page which shows both panels side-by-side.
     driver.get("https://www.linkedin.com/login")
 
-    # The login page renders both panels (Sign in + Use passkey). We use the first email input.
-    email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']")))
-    password_field = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+    # LinkedIn's DOM carries hidden duplicate inputs (passkey panel) ahead of
+    # the real ones — resolve the visible/enabled pair or Selenium dies with
+    # ElementNotInteractableException.
+    try:
+        email_field = wait.until(
+            lambda d: find_visible(d, EMAIL_SELECTORS, "email"))
+        password_field = find_visible(driver, PASSWORD_SELECTORS, "password")
+    except ValueError as exc:
+        raise RuntimeError(f"LinkedIn login form not found: {exc}") from exc
 
-    email_field.send_keys(email)
-    time.sleep(1)
-    password_field.send_keys(password)
-
-    sign_in_button = driver.find_element(By.XPATH, "//span[normalize-space()='Sign in']/ancestor::button")
-    sign_in_button.click()
+    focus_type(driver, email_field, email)
+    focus_type(driver, password_field, password)
+    click_sign_in(driver)
     time.sleep(5)
 
     # If LinkedIn shows a follow-up submit (e.g. consent/challenge), click it
