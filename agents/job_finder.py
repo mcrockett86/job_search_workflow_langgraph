@@ -146,8 +146,15 @@ async def main_pipeline(
 
     # 1. Scrape LinkedIn for new URLs.
     from .linkedin_scraper import scrape_linkedin_job_urls
+    from . import user_config
 
-    url_list = urls if urls is not None else LINKEDIN_URLS
+    # precedence: explicit arg > user-saved URLs > bundled defaults
+    if urls is None:
+        url_list = user_config.get_search_urls()
+    else:
+        url_list = urls
+    if user_config.urls_are_custom():
+        say(f"Using {len(url_list)} custom search URLs (user_config/search_urls.txt)")
     say("Scraping LinkedIn job URLs …")
     df_new_jobs = scrape_linkedin_job_urls(url_list, max_pages=max_pages)
     df_new_jobs = df_new_jobs.drop_duplicates()

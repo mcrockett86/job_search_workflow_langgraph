@@ -18,9 +18,17 @@ def get_resume(kind: str = "software") -> str:
     Parameters
     ----------
     kind : {"software", "full"}
-        - ``"software"`` — software experience only (default).
+        - ``"software"`` — software experience only (default).  When the user
+          has uploaded their own resume through the web UI (user_config/
+          resume.pdf) that file wins; otherwise the bundled one is used.
         - ``"full"`` — full resume including mechanical engineering.
     """
+    if kind != "full":
+        from .. import user_config
+        custom = user_config.get_resume_pdf_path()
+        if custom:
+            return _read_pdf(custom)
+
     module_dir = os.path.dirname(__file__)
     resources = os.path.join(module_dir, "resources")
 

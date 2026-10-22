@@ -52,6 +52,16 @@ A local FastAPI app + single-page viewer over a SQLite job database
 - **Click-through drawer** — prev/next (`j`/`k`, arrows), summary, full text,
   open the original URL.
 - **Export** — CSV or Markdown of the filtered set, summaries included.
+- **⚙ Search settings** — tailor the scan to *you* without touching code:
+  - **Resume PDF** — upload the resume used for job-vs-resume matching
+    (validated: real PDF, selectable text, ≤10 MB). Overwrites the cached copy.
+  - **Job-search URLs** — paste/build your own search-results URLs, one per
+    line. **Save** overwrites the previous list.
+  - **Reset** buttons restore the built-in defaults (the bundled software
+    resume and the curated LinkedIn queries).
+  Saved values are cached in local files under `user_config/`
+  (`resume.pdf`, `search_urls.txt` — git-ignored) and take effect on the next
+  scan. With no `user_config/` files the app uses the bundled defaults.
 
 The server binds `127.0.0.1` only — it can launch a run that uses your
 LinkedIn credentials, so keep it off the network. Override with

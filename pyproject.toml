@@ -20,6 +20,7 @@ dependencies = [
     "webdriver-manager>=4.0.2",
     "pypdf>=6.4.0",
     "fastapi>=0.152.0",
+    "python-multipart>=0.0.20",
     "uvicorn>=0.30",
 ]
 

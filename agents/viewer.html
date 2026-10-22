@@ -68,6 +68,25 @@
   #drawer pre { white-space: pre-wrap; font: 13px/1.55 ui-monospace, Menlo, monospace;
                 color: #334155; margin-top: 10px; }
   .empty-state { text-align: center; color: var(--muted); padding: 60px 0; }
+  /* --- search settings modal --- */
+  #cfgmodal { position: fixed; inset: 0; z-index: 50; display: none;
+              background: rgba(15,23,42,.45); }
+  #cfgmodal .panel { position: absolute; right: 0; top: 0; bottom: 0;
+                     width: min(560px, 94vw); background: #fff; padding: 22px 24px;
+                     overflow-y: auto; box-shadow: -8px 0 30px rgba(15,23,42,.25); }
+  #cfgmodal h2 { margin-bottom: 2px; padding-right: 90px; }
+  #cfgmodal .close { position: absolute; top: 16px; right: 18px; }
+  #cfgmodal .sec { margin-top: 22px; padding-top: 14px; border-top: 1px solid #e2e8f0; }
+  #cfgmodal .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 10px; }
+  #cfgmodal textarea { width: 100%; min-height: 220px; font: 12px/1.5 ui-monospace, Menlo, monospace;
+                       padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; }
+  #cfgmodal .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  #cfgmodal .status { font-size: 12.5px; color: var(--muted); }
+  #cfgmodal .status b.custom { color: #b45309; }
+  #cfgmodal .status b.default { color: #047857; }
+  #cfgmodal .msg { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  #cfgmodal .msg.ok { color: #047857; }
+  #cfgmodal .msg.err { color: #b91c1c; }
 </style>
 </head>
 <body>
@@ -94,6 +113,7 @@
     </select>
     <button class="secondary" id="export-csv">Export CSV</button>
     <button class="secondary" id="export-md">Export MD</button>
+    <button class="secondary" id="cfgbtn" title="Set your resume and job-search URLs">⚙ Search settings</button>
   </div>
   <div id="runlog"></div>
 </header>
@@ -116,6 +136,36 @@
     <button class="secondary" id="drawer-next">next →</button>
     <button class="secondary" id="drawer-open">open listing ↗</button>
   </div>
+</div></div>
+<div id="cfgmodal"><div class="panel">
+  <button class="close secondary" id="cfg-close">✕ close</button>
+  <h2>Search settings</h2>
+  <div class="hint">Tailor the scan to <b>your</b> resume and target roles/locations.
+    Values are saved to local files in <code>user_config/</code> and used on the next
+    scan; Reset restores the built-in defaults.</div>
+
+  <div class="sec">
+    <b>Resume PDF</b> <span class="status" id="cfg-resume-status"></span>
+    <div class="hint">Used for job-vs-resume matching. Upload overwrites the cached copy.</div>
+    <div class="row">
+      <input type="file" id="cfg-resume-file" accept="application/pdf,.pdf">
+      <button id="cfg-resume-save">Save resume</button>
+    </div>
+    <div class="row"><button class="secondary" id="cfg-resume-reset">Reset to default resume</button></div>
+  </div>
+
+  <div class="sec">
+    <b>Job-search URLs</b> <span class="status" id="cfg-urls-status"></span>
+    <div class="hint">One LinkedIn (or compatible) search-results URL per line.
+      Lines starting with <code>#</code> are ignored.</div>
+    <textarea id="cfg-urls-text" spellcheck="false" placeholder="https://www.linkedin.com/jobs/search/?keywords=..."></textarea>
+    <div class="row">
+      <button id="cfg-urls-save">Save URLs</button>
+      <button class="secondary" id="cfg-urls-reset">Reset to defaults</button>
+    </div>
+  </div>
+
+  <div class="msg" id="cfg-msg"></div>
 </div></div>
 <script>
 const $ = (s) => document.querySelector(s);
@@ -298,6 +348,66 @@ let debounce = null;
   $(s).addEventListener('change', () => { loadJobs(); loadFacets(); }));
 $('#f-search').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadJobs, 250); });
 $('#f-salary').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadJobs, 400); });
+
+// ---- search settings (resume + URLs) ----------------------------------------
+function cfgMsg(text, ok = true) {
+  const m = $('#cfg-msg');
+  m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err');
+  if (ok) setTimeout(() => { if (m.textContent === text) m.textContent = ''; }, 5000);
+}
+function badge(custom, customText, defaultText) {
+  return custom ? `<b class="custom">${customText}</b>` : `<b class="default">${defaultText}</b>`;
+}
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  const d = await r.json();
+  $('#cfg-resume-status').innerHTML = d.resume.custom
+    ? badge(true, `custom — ${d.resume.filename} (${d.resume.pages}p, saved ${d.resume.saved_at})`)
+    : badge(false, '', 'using built-in default');
+  $('#cfg-urls-status').innerHTML = d.urls.custom
+    ? badge(true, `custom — ${d.urls.count} saved`)
+    : badge(false, '', `using ${d.urls.count} built-in defaults`);
+  const ta = $('#cfg-urls-text');
+  if (!ta.dataset.dirty) ta.value = d.urls.urls.join('\n');
+}
+$('#cfgbtn').onclick = () => { $('#cfgmodal').style.display = 'block'; loadConfig(); };
+$('#cfg-close').onclick = () => $('#cfgmodal').style.display = 'none';
+$('#cfgmodal').addEventListener('click', (e) => { if (e.target.id === 'cfgmodal') $('#cfgmodal').style.display = 'none'; });
+$('#cfg-urls-text').addEventListener('input', () => { $('#cfg-urls-text').dataset.dirty = '1'; });
+
+$('#cfg-resume-save').onclick = async () => {
+  const f = $('#cfg-resume-file').files[0];
+  if (!f) return cfgMsg('Choose a PDF file first.', false);
+  const fd = new FormData(); fd.append('file', f);
+  const r = await fetch('/api/config/resume', { method: 'POST', body: fd });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return cfgMsg(d.detail || 'Upload failed.', false);
+  cfgMsg(`Resume saved — ${d.resume.filename}, ${d.resume.pages} page(s). Used on the next scan.`);
+  $('#cfg-resume-file').value = '';
+  loadConfig();
+};
+$('#cfg-urls-save').onclick = async () => {
+  const urls = $('#cfg-urls-text').value.split('\n')
+    .map(s => s.trim()).filter(s => s && !s.startsWith('#'));
+  const r = await fetch('/api/config/urls', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ urls }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return cfgMsg(d.detail || 'Save failed.', false);
+  $('#cfg-urls-text').dataset.dirty = '';
+  cfgMsg(`Saved ${d.saved} URL(s). Used on the next scan.`);
+  loadConfig();
+};
+async function cfgReset(which, label) {
+  const r = await fetch('/api/config/reset?which=' + which, { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return cfgMsg(d.detail || 'Reset failed.', false);
+  if (which !== 'resume') $('#cfg-urls-text').dataset.dirty = '';
+  cfgMsg(`${label} reset to built-in defaults.`);
+  loadConfig();
+}
+$('#cfg-resume-reset').onclick = () => cfgReset('resume', 'Resume');
+$('#cfg-urls-reset').onclick = () => cfgReset('urls', 'URLs');
 
 loadFacets(); loadJobs();
 </script>
