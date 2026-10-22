@@ -7,15 +7,25 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from agents import db, web
+from agents import db, profiles, web
 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    dbfile = os.path.join(tmp_path, "jobs.db")
-    monkeypatch.setattr(db, "DB_PATH", dbfile)
-    # Seed the DB before the app handles requests.
-    conn = db.get_conn(dbfile)
+    # Isolate ALL profile state (registry, config dirs, per-profile DBs)
+    # under tmp_path so tests never touch the real repo dirs.
+    root = str(tmp_path)
+    monkeypatch.setattr(profiles, "USER_DIR", os.path.join(root, "user_config"))
+    monkeypatch.setattr(profiles, "PROFILES_FILE",
+                        os.path.join(root, "user_config", "profiles.json"))
+    monkeypatch.setattr(profiles, "PROFILES_DIR",
+                        os.path.join(root, "user_config", "profiles"))
+    monkeypatch.setattr(profiles, "CACHE_DIR", os.path.join(root, "cache"))
+    monkeypatch.setattr(profiles, "PROFILE_CACHE_DIR",
+                        os.path.join(root, "cache", "profiles"))
+    profiles.ensure_init()
+    # Seed the DEFAULT profile's DB before the app handles requests.
+    conn = db.get_conn(profiles.get(profiles.default_slug()).db_path)
     db.upsert_results(conn, [
         {"job_url": "http://x/a", "is_match": True, "company_name": "Acme",
          "job_title": "Data Scientist", "job_type": "Full-time",
@@ -105,3 +115,49 @@ def test_run_status_shape(client):
     d = client.get("/api/run/status").json()
     assert set(d) >= {"running", "log", "error"}
     assert d["running"] is False
+
+
+# ---------------------------------------------------------------------------
+# Profiles: API scoping
+# ---------------------------------------------------------------------------
+def test_profiles_listed_with_mike_default(client):
+    d = client.get("/api/profiles").json()
+    slugs = [p["slug"] for p in d["profiles"]]
+    assert "mike" in slugs and "jen" in slugs
+    assert d["default"] == "mike"
+
+
+def test_config_reports_active_profile(client):
+    assert client.get("/api/config").json()["profile"] == "mike"
+    assert client.get("/api/config?profile=jen").json()["profile"] == "jen"
+
+
+def test_jobs_are_scoped_per_profile(client):
+    # seeded rows live in mike's DB; jen starts empty
+    assert len(client.get("/api/jobs").json()["jobs"]) == 3
+    assert client.get("/api/jobs?profile=jen").json()["jobs"] == []
+    assert client.get("/api/facets?profile=jen").json()["counts"].get("total", 0) == 0
+
+
+def test_resume_upload_scopes_to_profile(client):
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from test_user_config import build_pdf
+    pdf = build_pdf("Jen Jameson — data scientist")
+    r = client.post("/api/config/resume?profile=jen",
+                    files={"file": ("jen.pdf", pdf, "application/pdf")})
+    assert r.status_code == 200
+    assert client.get("/api/config?profile=jen").json()["resume"]["custom"] is True
+    assert client.get("/api/config?profile=mike").json()["resume"]["custom"] is False
+
+
+def test_unknown_profile_rejected(client):
+    assert client.get("/api/jobs?profile=ghost").status_code == 404
+
+
+def test_create_profile_via_api(client):
+    r = client.post("/api/profiles", json={"name": "Sam Lee"})
+    assert r.status_code == 200 and r.json()["slug"] == "sam-lee"
+    assert client.get("/api/jobs?profile=sam-lee").json()["jobs"] == []
+    # duplicate -> 400
+    assert client.post("/api/profiles", json={"name": "sam lee"}).status_code == 400

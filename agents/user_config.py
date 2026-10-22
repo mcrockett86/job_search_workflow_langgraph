@@ -7,8 +7,11 @@ owner's software-engineer resume and LinkedIn queries.
 
 Resolution order
 ----------------
-resume PDF : user_config/resume.pdf        -> agents/tools/resources/resume_software.pdf
-search URLs: user_config/search_urls.txt   -> config.LINKEDIN_URLS
+resume PDF : user_config/profiles/<profile>/resume.pdf -> agents/tools/resources/resume_software.pdf
+search URLs: user_config/profiles/<profile>/search_urls.txt -> config.LINKEDIN_URLS
+
+All paths are per-profile (see agents/profiles.py); the "current profile" is
+a contextvar set by the web layer per request / per background run.
 """
 
 from __future__ import annotations
@@ -17,15 +20,30 @@ import os
 import time
 
 from . import config
+from . import profiles as _profiles
 
 # Repo root = parent of the agents/ package directory.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 USER_DIR = os.path.join(ROOT, "user_config")
+# Legacy flat locations (pre-profiles) — kept for tests/overrides.
 USER_RESUME_PDF = os.path.join(USER_DIR, "resume.pdf")
 USER_URLS_FILE = os.path.join(USER_DIR, "search_urls.txt")
 
 MAX_RESUME_BYTES = 10 * 1024 * 1024  # 10 MB is generous for a resume
 PDF_MAGIC = b"%PDF"
+
+# Test hook: when set, all paths resolve here instead of the profile dirs.
+_override_dir: str | None = None
+
+
+def _paths():
+    """(dir, resume_pdf, resume_meta, urls_file) for the active target."""
+    if _override_dir:
+        d = _override_dir
+        return d, (os.path.join(d, "resume.pdf"), os.path.join(d, "resume_meta.txt"),
+                   os.path.join(d, "search_urls.txt"))
+    p = _profiles.current()
+    return p.config_dir, (p.resume_pdf, p.resume_meta, p.urls_file)
 
 
 # ---------------------------------------------------------------------------
@@ -56,21 +74,23 @@ def validate_urls(urls: list[str]) -> list[str]:
 def save_urls(urls: list[str]) -> int:
     """Overwrite the cached URL list. Returns the number saved."""
     urls = validate_urls(list(urls))
-    os.makedirs(USER_DIR, exist_ok=True)
+    d, (_, _, urls_file) = _paths()
+    os.makedirs(d, exist_ok=True)
     header = (
         "# Job-search URLs, one per line (lines starting with # are ignored).\n"
         f"# Saved {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
-    with open(USER_URLS_FILE, "w", encoding="utf-8") as fh:
+    with open(urls_file, "w", encoding="utf-8") as fh:
         fh.write(header + "\n".join(urls) + "\n")
     return len(urls)
 
 
 def get_search_urls() -> list[str]:
-    """Custom URLs when the user has saved some, else the bundled defaults."""
-    if os.path.isfile(USER_URLS_FILE):
+    """Custom URLs when the profile has saved some, else the bundled defaults."""
+    _, (_, _, urls_file) = _paths()
+    if os.path.isfile(urls_file):
         try:
-            with open(USER_URLS_FILE, encoding="utf-8") as fh:
+            with open(urls_file, encoding="utf-8") as fh:
                 urls = parse_urls(fh.read())
             if urls:
                 return urls
@@ -80,7 +100,7 @@ def get_search_urls() -> list[str]:
 
 
 def urls_are_custom() -> bool:
-    return os.path.isfile(USER_URLS_FILE)
+    return os.path.isfile(_paths()[1][2])
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +113,9 @@ def save_resume_pdf(data: bytes, original_name: str = "") -> dict:
     if len(data) > MAX_RESUME_BYTES:
         raise ValueError(f"PDF too large ({len(data) // 1024 // 1024} MB) — limit is "
                          f"{MAX_RESUME_BYTES // 1024 // 1024} MB.")
-    os.makedirs(USER_DIR, exist_ok=True)
-    tmp = USER_RESUME_PDF + ".tmp"
+    d, (resume_pdf, resume_meta_file, _) = _paths()
+    os.makedirs(d, exist_ok=True)
+    tmp = resume_pdf + ".tmp"
     with open(tmp, "wb") as fh:
         fh.write(data)
     # sanity check: pypdf must be able to open it before we replace the old one
@@ -110,31 +131,32 @@ def save_resume_pdf(data: bytes, original_name: str = "") -> dict:
         os.remove(tmp)
         raise ValueError("No selectable text found in the PDF — matching needs a "
                          "text resume, not a scanned image.")
-    os.replace(tmp, USER_RESUME_PDF)
+    os.replace(tmp, resume_pdf)
     meta = {
         "filename": os.path.basename(original_name or "resume.pdf"),
         "pages": pages,
         "bytes": len(data),
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    with open(os.path.join(USER_DIR, "resume_meta.txt"), "w", encoding="utf-8") as fh:
+    with open(resume_meta_file, "w", encoding="utf-8") as fh:
         fh.write("\n".join(f"{k}={v}" for k, v in meta.items()))
     return meta
 
 
 def get_resume_pdf_path() -> str | None:
-    """Path to the user's uploaded resume, or None when using the bundled one."""
-    return USER_RESUME_PDF if os.path.isfile(USER_RESUME_PDF) else None
+    """Path to the profile's uploaded resume, or None when using the bundled one."""
+    resume_pdf = _paths()[1][0]
+    return resume_pdf if os.path.isfile(resume_pdf) else None
 
 
 def resume_meta() -> dict | None:
-    path = os.path.join(USER_DIR, "resume_meta.txt")
-    if not os.path.isfile(USER_RESUME_PDF):
+    _, (resume_pdf, meta_path, _) = _paths()
+    if not os.path.isfile(resume_pdf):
         return None
     meta: dict[str, str] = {}
-    if os.path.isfile(path):
+    if os.path.isfile(meta_path):
         try:
-            with open(path, encoding="utf-8") as fh:
+            with open(meta_path, encoding="utf-8") as fh:
                 for line in fh:
                     if "=" in line:
                         k, v = line.strip().split("=", 1)
@@ -142,7 +164,7 @@ def resume_meta() -> dict | None:
         except OSError:
             pass
     meta.setdefault("filename", "resume.pdf")
-    meta["path"] = USER_RESUME_PDF
+    meta["path"] = resume_pdf
     return meta
 
 
@@ -150,14 +172,15 @@ def resume_meta() -> dict | None:
 # Reset
 # ---------------------------------------------------------------------------
 def reset(which: str = "all") -> list[str]:
-    """Delete cached user files so bundled defaults apply again.
+    """Delete the profile's cached files so bundled defaults apply again.
 
     Returns the list of things reset.
     """
     reset_items: list[str] = []
+    _, (resume_pdf, resume_meta_file, urls_file) = _paths()
     targets = {
-        "resume": [USER_RESUME_PDF, os.path.join(USER_DIR, "resume_meta.txt")],
-        "urls": [USER_URLS_FILE],
+        "resume": [resume_pdf, resume_meta_file],
+        "urls": [urls_file],
     }
     files: list[str] = []
     if which == "all":
@@ -180,10 +203,11 @@ def reset(which: str = "all") -> list[str]:
 # Status for the UI
 # ---------------------------------------------------------------------------
 def status() -> dict:
-    custom_urls = os.path.isfile(USER_URLS_FILE)
+    custom_urls = urls_are_custom()
     urls = get_search_urls()
     rmeta = resume_meta()
     return {
+        "profile": _profiles.current_slug(),
         "resume": {
             "custom": rmeta is not None,
             "filename": (rmeta or {}).get("filename"),

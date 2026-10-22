@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from .config import CACHE_DIR, EXCLUDED_COMPANIES, PRIOR_JOBS_CSV, RESULTS_CSV, LINKEDIN_URLS
+from .config import EXCLUDED_COMPANIES
 
 
 logger = logging.getLogger(__name__)
@@ -20,10 +20,13 @@ logger = logging.getLogger(__name__)
 def _db_upsert_seen(urls: list[str]) -> None:
     """Mirror scraped URLs into the SQLite viewer DB (best-effort)."""
     try:
+        from . import profiles
         from .db import get_conn, merge_legacy_csvs, upsert_seen
 
+        profiles.ensure_init()
+        p = profiles.current()
         conn = get_conn()
-        merge_legacy_csvs(conn)
+        merge_legacy_csvs(conn, prior_csv=p.prior_csv, results_csv=p.results_csv)
         upsert_seen(conn, urls)
         conn.close()
     except Exception as exc:  # noqa: BLE001 — DB is an additive view, never fatal
@@ -98,25 +101,38 @@ async def run_graph(df: pd.DataFrame) -> pd.DataFrame:
 # Data helpers
 # ---------------------------------------------------------------------------
 def _ensure_cache_dir() -> None:
-    """Create the cache directory if it doesn't exist."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    """Create the active profile's cache directory if it doesn't exist."""
+    from . import profiles
+
+    profiles.ensure_init()
+    profiles.current().ensure_dirs()
+
+
+def _prior_csv_path() -> str:
+    from . import profiles
+
+    profiles.ensure_init()
+    return profiles.current().prior_csv
 
 
 def _load_prior_jobs() -> pd.DataFrame | None:
-    """Load prior job cache, returning ``None`` if missing or empty."""
-    if not os.path.isfile(PRIOR_JOBS_CSV):
+    """Load the profile's job cache, returning ``None`` if missing or empty."""
+    path = _prior_csv_path()
+    if not os.path.isfile(path):
         return None
     try:
-        df = pd.read_csv(PRIOR_JOBS_CSV)
+        df = pd.read_csv(path)
         return df if not df.empty else None
     except Exception as exc:  # noqa: BLE001 — corrupt file → treat as empty
-        logger.warning("Could not read prior jobs CSV (%s): %s", PRIOR_JOBS_CSV, exc)
+        logger.warning("Could not read prior jobs CSV (%s): %s", path, exc)
         return None
 
 
 def _save_prior_jobs(df: pd.DataFrame) -> None:
-    """Append *df* rows to the prior-jobs cache."""
-    df.to_csv(PRIOR_JOBS_CSV, index=False)
+    """Write *df* rows to the profile's prior-jobs cache (overwrite)."""
+    path = _prior_csv_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_csv(path, index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +162,7 @@ async def main_pipeline(
 
     # 1. Scrape LinkedIn for new URLs.
     from .linkedin_scraper import scrape_linkedin_job_urls
-    from . import user_config
+    from . import profiles, user_config
 
     # precedence: explicit arg > user-saved URLs > bundled defaults
     if urls is None:
@@ -154,7 +170,7 @@ async def main_pipeline(
     else:
         url_list = urls
     if user_config.urls_are_custom():
-        say(f"Using {len(url_list)} custom search URLs (user_config/search_urls.txt)")
+        say(f"Using {len(url_list)} custom search URLs (profile '{profiles.current_slug()}')")
     say("Scraping LinkedIn job URLs …")
     df_new_jobs = scrape_linkedin_job_urls(url_list, max_pages=max_pages)
     df_new_jobs = df_new_jobs.drop_duplicates()
@@ -210,7 +226,10 @@ async def main_pipeline(
     # Screened rows (matches AND non-matches) go to the DB so the viewer can
     # show the full picture, not just the winners.
     _db_upsert_results(df_results.to_dict("records"))
-    output_path = RESULTS_CSV
+    from . import profiles
+
+    output_path = profiles.current().results_csv
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df_matches.to_csv(output_path, index=False)
     say(f"Results written to {output_path}")
 

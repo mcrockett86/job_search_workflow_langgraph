@@ -40,8 +40,9 @@ def build_pdf(text: str = "Jane Jobseeker — senior engineer") -> bytes:
 
 @pytest.fixture()
 def userdir(tmp_path, monkeypatch):
-    """Point all user_config paths at a temp dir."""
+    """Point all user_config paths at a temp dir (profile-agnostic hook)."""
     d = str(tmp_path / "user_config")
+    monkeypatch.setattr(user_config, "_override_dir", d)
     monkeypatch.setattr(user_config, "USER_DIR", d)
     monkeypatch.setattr(user_config, "USER_RESUME_PDF", os.path.join(d, "resume.pdf"))
     monkeypatch.setattr(user_config, "USER_URLS_FILE", os.path.join(d, "search_urls.txt"))

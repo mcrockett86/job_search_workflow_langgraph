@@ -42,9 +42,17 @@ python -m agents.job_finder --skip-prompt  # non-interactive
 ## Web viewer (`agents/web.py`)
 
 A local FastAPI app + single-page viewer over a SQLite job database
-(`cache/jobs.db`, auto-merged from the legacy CSVs on first start):
+(`cache/profiles/<profile>/jobs.db`, per profile):
 
-- **▶ Run new scan** — triggers the scrape→screen pipeline with a live log.
+- **👤 Profile selector** — each profile keeps its own resume, search URLs,
+  and discovered-jobs history, so scans never cross-contaminate. Ships with
+  **mike** (default; inherited the original global settings + history on
+  first run) and **jen** (clean slate). **＋ profile** adds more; the
+  browser remembers your last pick and every API call carries `?profile=`.
+  Data lives in `user_config/profiles/<slug>/` and `cache/profiles/<slug>/`
+  (both git-ignored; registry in `user_config/profiles.json`).
+- **▶ Run new scan** — triggers the scrape→screen pipeline with a live log,
+  for the selected profile.
 - **Browse & filter** — status badges, company/type dropdowns, free-text
   search, min-salary, sorting.
 - **Hover preview** — hovering a card fetches + summarizes the listing once
@@ -52,16 +60,15 @@ A local FastAPI app + single-page viewer over a SQLite job database
 - **Click-through drawer** — prev/next (`j`/`k`, arrows), summary, full text,
   open the original URL.
 - **Export** — CSV or Markdown of the filtered set, summaries included.
-- **⚙ Search settings** — tailor the scan to *you* without touching code:
+- **⚙ Search settings** — tailor the scan for the *selected profile*
+  without touching code:
   - **Resume PDF** — upload the resume used for job-vs-resume matching
     (validated: real PDF, selectable text, ≤10 MB). Overwrites the cached copy.
   - **Job-search URLs** — paste/build your own search-results URLs, one per
     line. **Save** overwrites the previous list.
   - **Reset** buttons restore the built-in defaults (the bundled software
-    resume and the curated LinkedIn queries).
-  Saved values are cached in local files under `user_config/`
-  (`resume.pdf`, `search_urls.txt` — git-ignored) and take effect on the next
-  scan. With no `user_config/` files the app uses the bundled defaults.
+    resume and the curated LinkedIn queries) for that profile only.
+  With no profile files saved, the app uses the bundled defaults.
 
 The server binds `127.0.0.1` only — it can launch a run that uses your
 LinkedIn credentials, so keep it off the network. Override with
@@ -88,8 +95,9 @@ service behind `job-search.blueskyengineering.net`:
   set-but-empty lines abort `deploy.sh` before the VPS is touched.
 - **No published port** — Caddy proxies `job_search:7867` on the compose
   network, so the app is never reachable unauthenticated.
-- **State**: named volumes keep `cache/jobs.db` and `user_config/`
-  (uploaded resume + saved search URLs) across redeploys.
+- **State**: named volumes keep `cache/` (per-profile job DBs + ledgers) and
+  `user_config/` (profile registry, uploaded resumes + saved search URLs)
+  across redeploys.
 - **Env** (see hostinger `.env.example`): `JOB_SEARCH_USER`,
   `JOB_SEARCH_BASIC_AUTH_HASH`, `JOB_SEARCH_LINKEDIN_EMAIL`,
   `JOB_SEARCH_LINKEDIN_PASSWORD` (optional — empty disables the Run
@@ -137,7 +145,10 @@ Copy `.env.example` to `.env` and set:
 2. **Filter** — New URLs are compared against a cache of previously processed jobs to avoid duplicates.
 3. **Classify** — For each new job, the graph fetches its HTML content and uses GPT-4o-mini to determine if it matches the candidate's resume.
 4. **Extract** — Matching jobs have their metadata (company, title, salary) extracted into structured JSON via LLM.
-5. **Output** — Results are written to `results_output.csv`. Prior-job cache is updated at `cache/target_jobs_old.csv`.
+5. **Output** — Results are written to the active profile's cache dir
+   (`cache/profiles/<profile>/results_output.csv`); that profile's
+   prior-job cache (`target_jobs_old.csv`) is updated so its next run
+   skips these jobs. Other profiles are unaffected.
 
 ## LangGraph DAG
 
