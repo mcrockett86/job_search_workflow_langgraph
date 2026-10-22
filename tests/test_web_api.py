@@ -89,26 +89,44 @@ def test_export_csv_and_md(client):
     assert "link: http://x/a" in r.text
 
 
-def test_run_requires_credentials(client, monkeypatch):
+def test_run_requires_linkedin_session(client, monkeypatch):
+    """No env creds and no saved per-profile session -> clear 400 pointing
+    at the new in-browser sign-in."""
     monkeypatch.delenv("LINKEDIN_EMAIL", raising=False)
     monkeypatch.delenv("LINKEDIN_PASSWORD", raising=False)
-    monkeypatch.delenv("LINKEDIN_PROFILE_DIR", raising=False)
     r = client.post("/api/run")
     assert r.status_code == 400
-    assert "LINKEDIN_EMAIL" in r.json()["detail"]
-    assert "linkedin_login" in r.json()["detail"]  # points at passwordless path
+    assert "LinkedIn sign-in" in r.json()["detail"]
 
 
-def test_run_accepts_persistent_profile_without_password(client, monkeypatch):
-    """A signed-in profile dir satisfies the auth gate — no password env vars."""
+def test_run_accepts_saved_profile_session_without_password(client, monkeypatch):
+    """A saved LinkedIn session for the profile satisfies the gate."""
     from agents import web as web_mod
     monkeypatch.delenv("LINKEDIN_EMAIL", raising=False)
     monkeypatch.delenv("LINKEDIN_PASSWORD", raising=False)
-    monkeypatch.setenv("LINKEDIN_PROFILE_DIR", "/tmp/js_test_profile")
-    monkeypatch.setattr("agents.web._run_pipeline_in_thread", lambda: None)
+    p = profiles.get(profiles.default_slug())
+    os.makedirs(p.linkedin_profile_dir, exist_ok=True)
+    with open(os.path.join(p.linkedin_profile_dir, "Cookies"), "w") as fh:
+        fh.write("x")  # non-empty Chrome dir == saved session heuristic
+    monkeypatch.setattr("agents.web._run_pipeline_in_thread", lambda *a: None)
     r = client.post("/api/run")
     assert r.status_code == 200
     web_mod.run_state.running = False  # don't leak the lock into other tests
+
+
+def test_run_gate_is_per_profile(client, monkeypatch):
+    """mike's saved session does not unlock jen's run."""
+    from agents import web as web_mod
+    monkeypatch.delenv("LINKEDIN_EMAIL", raising=False)
+    monkeypatch.delenv("LINKEDIN_PASSWORD", raising=False)
+    p = profiles.get("mike")
+    os.makedirs(p.linkedin_profile_dir, exist_ok=True)
+    with open(os.path.join(p.linkedin_profile_dir, "Cookies"), "w") as fh:
+        fh.write("x")
+    assert client.post("/api/run?profile=jen").status_code == 400
+    monkeypatch.setattr("agents.web._run_pipeline_in_thread", lambda *a: None)
+    assert client.post("/api/run?profile=mike").status_code == 200
+    web_mod.run_state.running = False
 
 
 def test_run_status_shape(client):

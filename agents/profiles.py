@@ -99,6 +99,18 @@ class Profile:
     def results_csv(self) -> str:
         return os.path.join(self.cache_dir, "results_output.csv")
 
+    @property
+    def linkedin_profile_dir(self) -> str:
+        """Persistent Chrome profile holding THIS profile's LinkedIn session.
+
+        Base dir = $LINKEDIN_PROFILE_DIR (VPS: inside the cache volume) or
+        the repo cache dir; each search profile gets its own subdirectory so
+        mike's LinkedIn login never leaks into jen's scans (and vice versa).
+        """
+        base = os.environ.get("LINKEDIN_PROFILE_DIR") or os.path.join(
+            CACHE_DIR, "linkedin_profile")
+        return os.path.join(base, self.slug)
+
     def ensure_dirs(self) -> None:
         os.makedirs(self.config_dir, exist_ok=True)
         os.makedirs(self.cache_dir, exist_ok=True)

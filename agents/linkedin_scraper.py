@@ -49,6 +49,29 @@ def profile_dir_from_env() -> str | None:
     return os.path.abspath(d) if d else None
 
 
+def linkedin_profile_dir() -> str:
+    """The *current search profile's* Chrome dir (per-person LinkedIn session).
+
+    Base = $LINKEDIN_PROFILE_DIR or cache/linkedin_profile; mike and jen get
+    separate subdirectories so sessions never cross over.
+    """
+    try:
+        from . import profiles
+        profiles.ensure_init()
+        return profiles.current().linkedin_profile_dir
+    except Exception:  # noqa: BLE001 — registry trouble: behave like pre-profiles
+        return profile_dir_from_env() or DEFAULT_PROFILE_DIR
+
+
+def has_saved_session(profile_dir: str | None = None) -> bool:
+    """Cheap heuristic: the Chrome dir exists and has content in it."""
+    d = profile_dir or linkedin_profile_dir()
+    try:
+        return os.path.isdir(d) and bool(os.listdir(d))
+    except OSError:
+        return False
+
+
 def is_logged_out_url(url: str) -> bool:
     u = (url or "").lower()
     return any(m in u for m in _LOGGED_OUT_MARKERS)
@@ -248,14 +271,15 @@ def scrape_linkedin_job_urls(
         Maximum number of pagination pages per URL.
 
     Auth resolution (first match wins):
-      1. ``LINKEDIN_PROFILE_DIR`` set and its session still valid → reuse the
-         signed-in profile. No password involved.
-      2. ``LINKEDIN_EMAIL`` / ``LINKEDIN_PASSWORD`` env vars → automated
-         fill (legacy path).
-      3. Neither → open a visible browser and wait for the user to sign in
-         themselves into the persistent profile.
+      1. The search profile's persistent Chrome profile (per person) with a
+         still-valid session → reuse it. No password involved. Sessions are
+         created via the viewer's "LinkedIn sign-in" button (works headless)
+         or `python -m agents.linkedin_login`.
+      2. Session invalid + ``LINKEDIN_EMAIL``/``LINKEDIN_PASSWORD`` env vars
+         → automated fill (legacy path; also refreshes the saved profile).
+      3. Session invalid + visible browser → wait for the user to sign in.
     """
-    profile_dir = profile_dir_from_env()
+    profile_dir = linkedin_profile_dir()
     have_creds = bool(os.environ.get("LINKEDIN_EMAIL")
                       and os.environ.get("LINKEDIN_PASSWORD"))
 
