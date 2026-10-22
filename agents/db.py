@@ -52,10 +52,19 @@ def _now() -> str:
 
 
 def get_conn(db_path: str | None = None) -> sqlite3.Connection:
-    """Open (and initialize if needed) the jobs database."""
-    path = db_path or DB_PATH
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    """Open (initialize if needed) the jobs database for a profile.
+
+    With no explicit path, uses the *current profile's* DB (see
+    agents/profiles.py) so each profile's discovered-job ledger stays
+    separate from every other profile's.
+    """
+    if db_path is None:
+        from . import profiles
+
+        profiles.ensure_init()
+        db_path = profiles.current().db_path
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     return conn
@@ -227,20 +236,25 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
     return out
 
 
-def merge_legacy_csvs(conn: sqlite3.Connection) -> bool:
+def merge_legacy_csvs(conn: sqlite3.Connection,
+                      prior_csv: str | None = None,
+                      results_csv: str | None = None) -> bool:
     """One-time merge of the legacy CSVs into an empty DB.
 
     Returns True if anything was imported. Safe to call on every startup:
-    it no-ops once the DB has rows.
+    it no-ops once the DB has rows. Paths default to the module-level
+    (pre-profiles) locations; callers pass the profile's own CSVs instead.
     """
+    prior_csv = prior_csv or PRIOR_JOBS_CSV
+    results_csv = results_csv or RESULTS_CSV
     if conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"] > 0:
         return False
     imported = False
-    if os.path.isfile(PRIOR_JOBS_CSV):
+    if os.path.isfile(prior_csv):
         try:
             import pandas as pd
 
-            df = pd.read_csv(PRIOR_JOBS_CSV)
+            df = pd.read_csv(prior_csv)
             urls = [u for u in df["job_url"].dropna().astype(str) if u.strip()]
             if urls:
                 upsert_seen(conn, urls)
@@ -248,11 +262,11 @@ def merge_legacy_csvs(conn: sqlite3.Connection) -> bool:
                 logger.info("Merged %d seen URLs from %s", len(urls), PRIOR_JOBS_CSV)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not merge %s: %s", PRIOR_JOBS_CSV, exc)
-    if os.path.isfile(RESULTS_CSV):
+    if os.path.isfile(results_csv):
         try:
             import pandas as pd
 
-            df = pd.read_csv(RESULTS_CSV)
+            df = pd.read_csv(results_csv)
             rows = df.to_dict("records")
             if rows:
                 upsert_results(conn, rows)

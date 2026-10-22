@@ -213,7 +213,10 @@ dotenv.env
 results_output.csv
 .DS_Store
 agents/tools/resources/resume_*backup*.pdf
-cache/jobs.db
+# per-profile runtime state (jobs.db, prior-jobs ledger, results) — was
+# cache/jobs.db + tracked cache/target_jobs_old.csv before named profiles
+cache/
 
 # per-user settings uploaded through the web UI (resume.pdf, search_urls.txt)
+# plus the profile registry (user_config/profiles.json, profiles/<slug>/)
 user_config/

@@ -32,7 +32,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import db, user_config
+from . import db, profiles, user_config
 from .summary import guess_title_company, preview_text, summarize
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,39 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VIEWER_HTML = os.path.join(HERE, "viewer.html")
 
 app = FastAPI(title="Job Search Viewer", docs_url=None, redoc_url=None)
+
+
+# ---------------------------------------------------------------------------
+# Profile scoping: ?profile=<slug> (or X-Profile header) selects the active
+# profile for the request; everything downstream (config, DB, caches) reads
+# it from the contextvar. Unknown slugs are rejected up front.
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def profile_middleware(request: Request, call_next):
+    slug = request.query_params.get("profile") or request.headers.get("x-profile")
+    token = None
+    if slug:
+        try:
+            slug = profiles.slugify(slug)
+            profiles.ensure_init()
+            profiles.get(slug)
+        except (KeyError, ValueError):
+            return JSONResponse({"detail": f"Unknown profile: {slug}"},
+                                status_code=404)
+        token = profiles.set_current(slug)
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            profiles.reset_current(token)
+
+
+def _open_db() -> "db.sqlite3.Connection":
+    """Current profile's DB, with its legacy CSVs merged in if needed."""
+    conn = db.get_conn()
+    p = profiles.current()
+    db.merge_legacy_csvs(conn, prior_csv=p.prior_csv, results_csv=p.results_csv)
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +88,7 @@ class RunState:
         self.finished_at: str | None = None
         self.error: str | None = None
         self.last_result: str | None = None
+        self.profile: str | None = None
 
     def append(self, msg: str) -> None:
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -71,6 +105,7 @@ class RunState:
             "finished_at": self.finished_at,
             "error": self.error,
             "last_result": self.last_result,
+            "profile": self.profile,
             "log": self.log[-120:],
         }
 
@@ -78,8 +113,13 @@ class RunState:
 run_state = RunState()
 
 
-def _run_pipeline_in_thread() -> None:
-    """Background worker: runs main_pipeline in a private event loop."""
+def _run_pipeline_in_thread(profile_slug: str | None = None) -> None:
+    """Background worker: runs main_pipeline in a private event loop.
+
+    Threads start with a fresh contextvar context, so the profile that was
+    active when /api/run was called is re-set here explicitly — the whole
+    run (URLs, resume, seen-job ledger, DB) then resolves to that profile.
+    """
 
     def progress(msg: str) -> None:
         run_state.append(msg)
@@ -89,6 +129,8 @@ def _run_pipeline_in_thread() -> None:
 
         await main_pipeline(skip_prompt=True, progress=progress)
 
+    if profile_slug:
+        profiles.set_current(profile_slug)
     try:
         asyncio.run(_go())
         run_state.last_result = "done"
@@ -115,8 +157,7 @@ def api_jobs(
     min_salary: float | None = Query(None, ge=0),
     sort: str = Query("seen"),
 ) -> JSONResponse:
-    conn = db.get_conn()
-    db.merge_legacy_csvs(conn)
+    conn = _open_db()
     rows = db.list_jobs(
         conn, status=status, company=company, job_type=job_type,
         search=search, min_salary=min_salary, sort=sort,
@@ -130,8 +171,7 @@ def api_jobs(
 
 @app.get("/api/facets")
 def api_facets() -> JSONResponse:
-    conn = db.get_conn()
-    db.merge_legacy_csvs(conn)
+    conn = _open_db()
     out = {"facets": db.facets(conn), "counts": db.counts(conn)}
     conn.close()
     return JSONResponse(out)
@@ -156,18 +196,21 @@ def api_run() -> JSONResponse:
                     "and set LINKEDIN_PROFILE_DIR."
                 ),
             )
+    run_profile = profiles.current_slug()
     with run_state.lock:
         if run_state.running:
             raise HTTPException(status_code=409, detail="A run is already in progress")
         run_state.running = True
         run_state.log = []
         run_state.error = None
+        run_state.profile = run_profile
         run_state.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         run_state.finished_at = None
-        run_state.append("Run started")
-        t = threading.Thread(target=_run_pipeline_in_thread, daemon=True)
+        run_state.append(f"Run started (profile: {run_profile})")
+        t = threading.Thread(target=_run_pipeline_in_thread, args=(run_profile,),
+                             daemon=True)
         t.start()
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "profile": run_profile})
 
 
 @app.get("/api/run/status")
@@ -217,8 +260,7 @@ def api_preview(url: str = Query(..., min_length=8)) -> JSONResponse:
 
 def _filtered_rows(request: Request) -> list[dict[str, Any]]:
     q = request.query_params
-    conn = db.get_conn()
-    db.merge_legacy_csvs(conn)
+    conn = _open_db()
     rows = db.list_jobs(
         conn,
         status=q.get("status", "all"),
@@ -281,6 +323,31 @@ def _salary_str(r: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+class ProfileIn(BaseModel):
+    name: str
+
+
+@app.get("/api/profiles")
+def api_profiles() -> JSONResponse:
+    """All profiles + which one is the server-side default."""
+    profiles.ensure_init()
+    return JSONResponse({"profiles": profiles.list_profiles(),
+                         "default": profiles.default_slug()})
+
+
+@app.post("/api/profiles")
+def api_profiles_create(body: ProfileIn) -> JSONResponse:
+    """Create a new profile (fresh resume/URLs/history)."""
+    try:
+        p = profiles.create(body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"ok": True, "slug": p.slug})
+
+
+# ---------------------------------------------------------------------------
 # Search configuration (resume + URLs)
 # ---------------------------------------------------------------------------
 class UrlsIn(BaseModel):
@@ -340,9 +407,8 @@ def main() -> None:
 
     host = os.environ.get("JOB_VIEWER_HOST", "127.0.0.1")
     port = int(os.environ.get("JOB_VIEWER_PORT", "8734"))
-    conn = db.get_conn()
-    if db.merge_legacy_csvs(conn):
-        logger.info("Merged legacy CSVs into %s", db.DB_PATH)
+    profiles.ensure_init()
+    conn = _open_db()
     conn.close()
     print(f"Job viewer → http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")

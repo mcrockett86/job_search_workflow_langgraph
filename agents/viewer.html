@@ -94,6 +94,8 @@
   <h1>Job Search Viewer</h1>
   <span class="badges" id="badges"></span>
   <div class="toolbar">
+    <select id="profselect" title="Search profile — each profile keeps its own resume, URLs, and job history"></select>
+    <button class="secondary" id="profnew" title="Create a new profile">＋ profile</button>
     <button id="runbtn" title="Scrape LinkedIn and screen new jobs">▶ Run new scan</button>
     <select id="f-status">
       <option value="all">all statuses</option>
@@ -173,6 +175,41 @@ let jobs = [];
 let drawerIdx = -1;
 const previewCache = new Map();
 
+// ---- profiles ---------------------------------------------------------------
+// The active profile is remembered per browser; every API call carries it as
+// ?profile= so resume, URLs, and job history all scope to that person.
+const PROF_KEY = 'jobsea…file';
+function prof() { return localStorage.getItem(PROF_KEY) || ''; }
+function purl(path) {
+  const p = new URLSearchParams();
+  if (prof()) p.set('profile', prof());
+  if (!path.includes('?')) return path + '?' + p.toString();
+  return path + (path.endsWith('?') || path.endsWith('&') ? '' : '&') + p.toString();
+}
+async function loadProfiles() {
+  const r = await fetch('/api/profiles');
+  const d = await r.json();
+  const sel = $('#profselect');
+  sel.innerHTML = d.profiles.map(p =>
+    `<option value="${p.slug}" ${p.slug === prof() ? 'selected' : ''}>👤 ${p.slug}${p.is_default ? ' ★' : ''}</option>`).join('');
+  if (!d.profiles.some(p => p.slug === prof())) {
+    localStorage.setItem(PROF_KEY, d.default);
+    sel.value = d.default;
+  }
+  sel.onchange = () => { localStorage.setItem(PROF_KEY, sel.value); previewCache.clear(); loadFacets(); loadJobs(); loadConfig(); };
+}
+$('#profnew').onclick = async () => {
+  const name = prompt('New profile name (letters/numbers, e.g. "jen"):');
+  if (!name) return;
+  const r = await fetch('/api/profiles', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return alert(d.detail || 'Could not create profile.');
+  localStorage.setItem(PROF_KEY, d.slug);
+  location.reload();
+};
+
 function qs() {
   const p = new URLSearchParams();
   for (const [k, sel] of [["status","#f-status"],["company","#f-company"],["job_type","#f-type"],
@@ -184,7 +221,7 @@ function qs() {
 }
 
 async function loadFacets() {
-  const r = await fetch('/api/facets'); const d = await r.json();
+  const r = await fetch(purl('/api/facets')); const d = await r.json();
   const fill = (sel, items) => {
     const cur = $(sel).value;
     const first = $(sel).options[0].textContent;
@@ -203,7 +240,7 @@ async function loadFacets() {
 }
 
 async function loadJobs() {
-  const r = await fetch('/api/jobs?' + qs());
+  const r = await fetch(purl('/api/jobs?' + qs()));
   const d = await r.json();
   jobs = d.jobs;
   render();
@@ -265,7 +302,7 @@ async function showHover(card) {
     text = previewCache.get(j.job_url);
   } else {
     try {
-      const r = await fetch('/api/preview?url=' + encodeURIComponent(j.job_url));
+      const r = await fetch(purl('/api/preview?url=' + encodeURIComponent(j.job_url)));
       if (r.ok) {
         const d = await r.json();
         previewCache.set(j.job_url, d.preview || d.summary || '');
@@ -296,7 +333,7 @@ async function openDrawer(i) {
   if (previewCache.has(j.job_url)) { pre.textContent = previewCache.get(j.job_url); return; }
   pre.textContent = 'loading…';
   try {
-    const r = await fetch('/api/preview?url=' + encodeURIComponent(j.job_url));
+    const r = await fetch(purl('/api/preview?url=' + encodeURIComponent(j.job_url)));
     const d = await r.json();
     const txt = d.preview || d.summary || '(no preview available)';
     previewCache.set(j.job_url, txt);
@@ -317,7 +354,7 @@ document.addEventListener('keydown', (e) => {
 // ---- run pipeline ----------------------------------------------------------
 let pollTimer = null;
 $('#runbtn').onclick = async () => {
-  const r = await fetch('/api/run', { method: 'POST' });
+  const r = await fetch(purl('/api/run'), { method: 'POST' });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) { alert(d.detail || 'could not start run'); return; }
   $('#runbtn').disabled = true;
@@ -339,8 +376,8 @@ async function pollRun() {
 }
 
 // ---- export ----------------------------------------------------------------
-$('#export-csv').onclick = () => location.href = '/api/export?format=csv&' + qs();
-$('#export-md').onclick  = () => location.href = '/api/export?format=md&' + qs();
+$('#export-csv').onclick = () => location.href = purl('/api/export?format=csv&') + qs();
+$('#export-md').onclick  = () => location.href = purl('/api/export?format=md&') + qs();
 
 // ---- wiring ----------------------------------------------------------------
 let debounce = null;
@@ -359,7 +396,7 @@ function badge(custom, customText, defaultText) {
   return custom ? `<b class="custom">${customText}</b>` : `<b class="default">${defaultText}</b>`;
 }
 async function loadConfig() {
-  const r = await fetch('/api/config');
+  const r = await fetch(purl('/api/config'));
   const d = await r.json();
   $('#cfg-resume-status').innerHTML = d.resume.custom
     ? badge(true, `custom — ${d.resume.filename} (${d.resume.pages}p, saved ${d.resume.saved_at})`)
@@ -379,7 +416,7 @@ $('#cfg-resume-save').onclick = async () => {
   const f = $('#cfg-resume-file').files[0];
   if (!f) return cfgMsg('Choose a PDF file first.', false);
   const fd = new FormData(); fd.append('file', f);
-  const r = await fetch('/api/config/resume', { method: 'POST', body: fd });
+  const r = await fetch(purl('/api/config/resume'), { method: 'POST', body: fd });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return cfgMsg(d.detail || 'Upload failed.', false);
   cfgMsg(`Resume saved — ${d.resume.filename}, ${d.resume.pages} page(s). Used on the next scan.`);
@@ -389,7 +426,7 @@ $('#cfg-resume-save').onclick = async () => {
 $('#cfg-urls-save').onclick = async () => {
   const urls = $('#cfg-urls-text').value.split('\n')
     .map(s => s.trim()).filter(s => s && !s.startsWith('#'));
-  const r = await fetch('/api/config/urls', {
+  const r = await fetch(purl('/api/config/urls'), {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ urls }) });
   const d = await r.json().catch(() => ({}));
@@ -399,7 +436,7 @@ $('#cfg-urls-save').onclick = async () => {
   loadConfig();
 };
 async function cfgReset(which, label) {
-  const r = await fetch('/api/config/reset?which=' + which, { method: 'POST' });
+  const r = await fetch(purl('/api/config/reset?which=' + which), { method: 'POST' });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) return cfgMsg(d.detail || 'Reset failed.', false);
   if (which !== 'resume') $('#cfg-urls-text').dataset.dirty = '';
@@ -409,7 +446,7 @@ async function cfgReset(which, label) {
 $('#cfg-resume-reset').onclick = () => cfgReset('resume', 'Resume');
 $('#cfg-urls-reset').onclick = () => cfgReset('urls', 'URLs');
 
-loadFacets(); loadJobs();
+loadProfiles(); loadFacets(); loadJobs();
 </script>
 </body>
 </html>
