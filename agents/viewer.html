@@ -190,12 +190,12 @@ async function loadProfiles() {
   const r = await fetch('/api/profiles');
   const d = await r.json();
   const sel = $('#profselect');
-  sel.innerHTML = d.profiles.map(p =>
-    `<option value="${p.slug}" ${p.slug === prof() ? 'selected' : ''}>👤 ${p.slug}${p.is_default ? ' ★' : ''}</option>`).join('');
   if (!d.profiles.some(p => p.slug === prof())) {
     localStorage.setItem(PROF_KEY, d.default);
-    sel.value = d.default;
   }
+  sel.innerHTML = d.profiles.map(p =>
+    `<option value="${p.slug}">👤 ${p.slug}${p.is_default ? ' ★' : ''}</option>`).join('');
+  sel.value = prof();
   sel.onchange = () => { localStorage.setItem(PROF_KEY, sel.value); previewCache.clear(); loadFacets(); loadJobs(); loadConfig(); };
 }
 $('#profnew').onclick = async () => {
@@ -446,7 +446,9 @@ async function cfgReset(which, label) {
 $('#cfg-resume-reset').onclick = () => cfgReset('resume', 'Resume');
 $('#cfg-urls-reset').onclick = () => cfgReset('urls', 'URLs');
 
-loadProfiles(); loadFacets(); loadJobs();
+// profile first: every data call carries ?profile=, so the selector,
+// storage, and the visible list must agree before the first paint.
+loadProfiles().then(() => { loadFacets(); loadJobs(); });
 </script>
 </body>
 </html>
