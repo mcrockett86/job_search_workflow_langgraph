@@ -71,6 +71,56 @@ LinkedIn credentials, so keep it off the network. Override with
 uv run pytest tests -q   # test suite (db, summarizer, API)
 ```
 
+## Deploying on the VPS (hostinger stack)
+
+The stack repo (`~/code/hostinger`) ships this app as the `job_search`
+service behind `job-search.blueskyengineering.net`:
+
+- **Image**: `containers/Dockerfile_JobSearch` — python:3.13-slim +
+  chromium/chromedriver so the "Run new scan" LinkedIn scrape works
+  headless in-container. `.dockerignore` keeps `.env`/`dotenv.env` and
+  personal resume backups out of the image; credentials arrive only via
+  compose environment.
+- **Gatekeeper auth**: Caddy `basic_auth` over the WHOLE site, from
+  `JOB_SEARCH_USER` + `JOB_SEARCH_BASIC_AUTH_HASH` in the stack `.env`
+  (bcrypt hash: `docker compose exec caddy caddy hash-password --plaintext '<pass>'`).
+  Fail-closed: missing vars fall back to a throwaway-hash default;
+  set-but-empty lines abort `deploy.sh` before the VPS is touched.
+- **No published port** — Caddy proxies `job_search:7867` on the compose
+  network, so the app is never reachable unauthenticated.
+- **State**: named volumes keep `cache/jobs.db` and `user_config/`
+  (uploaded resume + saved search URLs) across redeploys.
+- **Env** (see hostinger `.env.example`): `JOB_SEARCH_USER`,
+  `JOB_SEARCH_BASIC_AUTH_HASH`, `JOB_SEARCH_LINKEDIN_EMAIL`,
+  `JOB_SEARCH_LINKEDIN_PASSWORD` (optional — empty disables the Run
+  button), plus the shared `OPENAI_API_KEY`.
+- **DNS**: needs an `A` record `job-search` → the VPS IP before Caddy can
+  issue the certificate.
+
+## LinkedIn login — passwordless (recommended)
+
+Sign in **once** into a persistent browser profile; the tool never sees or
+stores your password (you type it into LinkedIn's own page, or use a
+passkey/2FA). Every later "Run new scan" reuses the saved session:
+
+```bash
+uv run python -m agents.linkedin_login           # opens a browser, sign in there
+uv run python -m agents.linkedin_login --status  # check the saved session
+uv run python -m agents.linkedin_login --reset   # wipe it
+```
+
+Then set `LINKEDIN_PROFILE_DIR` (default location: `cache/linkedin_profile`).
+On the VPS the profile lives in the `job_search_cache` volume — sign in once:
+
+```bash
+docker compose exec -T job_search xvfb-run -a python -m agents.linkedin_login
+```
+
+### Legacy: password env vars
+
+`LINKEDIN_EMAIL` + `LINKEDIN_PASSWORD` still work (automated fill), but
+prefer the profile — no password in any `.env`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and set:

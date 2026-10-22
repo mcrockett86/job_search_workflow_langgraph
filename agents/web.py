@@ -141,12 +141,21 @@ def api_facets() -> JSONResponse:
 def api_run() -> JSONResponse:
     if run_state.running:
         raise HTTPException(status_code=409, detail="A run is already in progress")
-    missing = [v for v in ("LINKEDIN_EMAIL", "LINKEDIN_PASSWORD") if not os.environ.get(v)]
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing env vars for scraping: {', '.join(missing)}. Set them in .env and restart the server.",
-        )
+    # Auth resolution mirrors linkedin_scraper: a persistent profile (no
+    # password anywhere) satisfies the gate just as well as env credentials.
+    from . import linkedin_scraper  # lazy: keeps selenium off the import path
+    if not linkedin_scraper.profile_dir_from_env():
+        missing = [v for v in ("LINKEDIN_EMAIL", "LINKEDIN_PASSWORD") if not os.environ.get(v)]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Missing LinkedIn auth: {', '.join(missing)} unset and no "
+                    "LINKEDIN_PROFILE_DIR set. Recommended: sign in once with "
+                    "`python -m agents.linkedin_login` (passwordless profile) "
+                    "and set LINKEDIN_PROFILE_DIR."
+                ),
+            )
     with run_state.lock:
         if run_state.running:
             raise HTTPException(status_code=409, detail="A run is already in progress")
