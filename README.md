@@ -53,13 +53,20 @@ A local FastAPI app + single-page viewer over a SQLite job database
   (both git-ignored; registry in `user_config/profiles.json`).
 - **▶ Run new scan** — triggers the scrape→screen pipeline with a live log,
   for the selected profile.
-- **Browse & filter** — status badges, company/type dropdowns, free-text
-  search, min-salary, sorting.
+- **Browse & filter** — status badges, company/type dropdowns, work-mode
+  filter (remote / hybrid / in person / unknown), free-text search,
+  min-salary, sorting. Work mode is auto-classified from the posting text
+  (title, description, hover-preview text) with hybrid > remote > on-site
+  precedence; jobs with no classifiable text stay `unknown`.
 - **Hover preview** — hovering a card fetches + summarizes the listing once
   (cached in the DB); pipeline runs also store a summary at screen time.
 - **Click-through drawer** — prev/next (`j`/`k`, arrows), summary, full text,
   open the original URL.
-- **Export** — CSV or Markdown of the filtered set, summaries included.
+- **Live progress bar** — while a scan runs, the header shows a bar with
+  counts: pages scraped per search URL (`Scraping LinkedIn: 7/20`) and jobs
+  screened (`Screening jobs: 12/15`). It survives a page reload mid-run.
+- **Export** — CSV or Markdown of the filtered set (filters included),
+  summaries and work mode included.
 - **⚙ Search settings** — tailor the scan for the *selected profile*
   without touching code:
   - **Resume PDF** — upload the resume used for job-vs-resume matching

@@ -40,10 +40,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     summary      TEXT,
     preview      TEXT,
     preview_at   TEXT,
+    work_mode    TEXT,  -- remote | hybrid | in_person (NULL = unknown)
     run_count    INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_seen   ON jobs(last_seen);
+-- idx_jobs_mode is created in _migrate() so it works on legacy DBs too.
 """
 
 
@@ -67,7 +69,39 @@ def get_conn(db_path: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a DB was first created (idempotent)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if "work_mode" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN work_mode TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_mode ON jobs(work_mode)")
+    conn.commit()
+    backfill_work_modes(conn)
+
+
+def backfill_work_modes(conn: sqlite3.Connection) -> int:
+    """Classify rows that have text but no work_mode yet (idempotent)."""
+    from .work_mode import classify_work_mode
+
+    rows = conn.execute(
+        """SELECT rowid, job_title, summary, preview FROM jobs
+           WHERE work_mode IS NULL
+             AND (COALESCE(summary,'') <> '' OR COALESCE(preview,'') <> '')"""
+    ).fetchall()
+    n = 0
+    for r in rows:
+        mode = classify_work_mode(r["job_title"], r["preview"], r["summary"])
+        if mode:
+            conn.execute("UPDATE jobs SET work_mode = ? WHERE rowid = ?",
+                         (mode, r["rowid"]))
+            n += 1
+    if n:
+        conn.commit()
+    return n
 
 
 def _clean(value: Any) -> Any:
@@ -115,6 +149,8 @@ def upsert_seen(conn: sqlite3.Connection, urls: Iterable[str]) -> int:
 
 def upsert_results(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> int:
     """Upsert screened job rows (match or rejected) with their metadata."""
+    from .work_mode import classify_work_mode
+
     now = _now()
     count = 0
     for row in rows:
@@ -125,12 +161,17 @@ def upsert_results(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> 
         if isinstance(is_match, str):
             is_match = is_match.strip().lower() in ("true", "1", "yes")
         status = "match" if is_match else "rejected"
+        # Work mode is derived from whatever posting text we have; the
+        # existing preview column is backfilled later, so re-derive then too.
+        work_mode = row.get("work_mode") or classify_work_mode(
+            row.get("job_title"), row.get("job_description"),
+            row.get("description"), row.get("summary"), row.get("preview"))
         conn.execute(
             """
             INSERT INTO jobs (job_url, first_seen, last_seen, status, is_match,
                               company_name, job_title, job_type, salary_min, salary_max,
-                              summary, run_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                              summary, work_mode, run_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(job_url) DO UPDATE SET
                 last_seen    = excluded.last_seen,
                 status       = excluded.status,
@@ -141,6 +182,7 @@ def upsert_results(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> 
                 salary_min   = COALESCE(excluded.salary_min, jobs.salary_min),
                 salary_max   = COALESCE(excluded.salary_max, jobs.salary_max),
                 summary      = COALESCE(excluded.summary, jobs.summary),
+                work_mode    = COALESCE(excluded.work_mode, jobs.work_mode),
                 run_count    = jobs.run_count + 1
             """,
             (
@@ -151,6 +193,7 @@ def upsert_results(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> 
                 _clean(row.get("salary_min")),
                 _clean(row.get("salary_max")),
                 _clean(row.get("summary")),
+                _clean(work_mode),
             ),
         )
         count += 1
@@ -160,9 +203,19 @@ def upsert_results(conn: sqlite3.Connection, rows: Iterable[dict[str, Any]]) -> 
 
 def set_preview(conn: sqlite3.Connection, url: str, preview: str, summary: str | None) -> None:
     """Cache fetched page text + summary for hover previews."""
+    from .work_mode import classify_work_mode
+
+    row = conn.execute(
+        "SELECT job_title, work_mode FROM jobs WHERE job_url = ?", (url,)
+    ).fetchone()
+    # The full page text is the best signal we get for most jobs — fill in
+    # work_mode here when screening didn't already determine it.
+    mode = classify_work_mode(
+        row["job_title"] if row else None, preview, summary) if preview else None
     conn.execute(
-        "UPDATE jobs SET preview = ?, summary = COALESCE(?, summary), preview_at = ? WHERE job_url = ?",
-        (preview, summary, _now(), url),
+        """UPDATE jobs SET preview = ?, summary = COALESCE(?, summary),
+           preview_at = ?, work_mode = COALESCE(work_mode, ?) WHERE job_url = ?""",
+        (preview, summary, _now(), mode, url),
     )
     conn.commit()
 
@@ -173,6 +226,7 @@ def list_jobs(
     status: str | None = None,
     company: str | None = None,
     job_type: str | None = None,
+    work_mode: str | None = None,
     search: str | None = None,
     min_salary: float | None = None,
     sort: str = "seen",
@@ -190,6 +244,12 @@ def list_jobs(
     if job_type:
         where.append("LOWER(job_type) = LOWER(?)")
         params.append(job_type)
+    if work_mode and work_mode != "all":
+        if work_mode == "unknown":
+            where.append("work_mode IS NULL")
+        else:
+            where.append("work_mode = ?")
+            params.append(work_mode)
     if search:
         like = f"%{search}%"
         where.append("(job_title LIKE ? OR company_name LIKE ? OR summary LIKE ? OR preview LIKE ? OR job_url LIKE ?)")
@@ -233,6 +293,10 @@ def counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     out = {r["status"]: r["n"] for r in rows}
     out["total"] = sum(out.values())
+    for r in conn.execute(
+            "SELECT work_mode, COUNT(*) AS n FROM jobs "
+            "WHERE work_mode IS NOT NULL GROUP BY work_mode"):
+        out[f"mode_{r['work_mode']}"] = r["n"]
     return out
 
 
