@@ -55,18 +55,29 @@ def create_job_graph():
     return _build()
 
 
-async def run_graph(df: pd.DataFrame) -> pd.DataFrame:
+async def run_graph(df: pd.DataFrame, stage=None) -> pd.DataFrame:
     """Process each row in *df* through the job graph.
 
     Returns the same DataFrame with additional columns populated
     (match metadata plus a heuristic ``summary``/``preview`` for the viewer).
+
+    ``stage(done, total, label)`` is called after each job so the web viewer
+    can render a progress bar for the screening phase.
     """
     from .graph import create_job_graph  # re-import to avoid circular top-level import
     from .summary import preview_text, summarize
 
     graph = create_job_graph()
+    total = len(df)
 
-    for i, row in df.iterrows():
+    def _stage(done: int, label: str) -> None:
+        if stage:
+            try:
+                stage(done, total, label)
+            except Exception:  # noqa: BLE001 — progress must never break the run
+                pass
+
+    for done, (i, row) in enumerate(df.iterrows(), start=1):
         try:
             run_state = {
                 "id_run": str(uuid.uuid4()),
@@ -93,6 +104,7 @@ async def run_graph(df: pd.DataFrame) -> pd.DataFrame:
 
         except Exception as exc:  # noqa: BLE001 — log and continue
             logger.error("Error processing row %d (%s): %s", i, row.get("job_url"), exc)
+        _stage(done, "screening jobs")
 
     return df
 
@@ -158,6 +170,19 @@ async def main_pipeline(
             except Exception:  # noqa: BLE001 — progress must never break the run
                 pass
 
+    def stage(info: dict) -> None:
+        """Structured progress: {'stage','done','total','label','msg'}.
+
+        Back-compat: a plain-string ``progress`` callback (CLI/tests) gets
+        the human line instead of the dict.
+        """
+        say(info.get("msg") or info.get("label") or "")
+        if progress:
+            try:
+                progress(info)
+            except Exception:  # noqa: BLE001
+                pass
+
     _ensure_cache_dir()
 
     # 1. Scrape LinkedIn for new URLs.
@@ -172,7 +197,13 @@ async def main_pipeline(
     if user_config.urls_are_custom():
         say(f"Using {len(url_list)} custom search URLs (profile '{profiles.current_slug()}')")
     say("Scraping LinkedIn job URLs …")
-    df_new_jobs = scrape_linkedin_job_urls(url_list, max_pages=max_pages)
+
+    def _scrape_progress(done: int, total: int, label: str) -> None:
+        stage({"stage": "scrape", "done": done, "total": total, "label": label,
+               "msg": f"Scraping LinkedIn — {label} ({done}/{total} pages)"})
+
+    df_new_jobs = scrape_linkedin_job_urls(url_list, max_pages=max_pages,
+                                           progress=_scrape_progress if progress else None)
     df_new_jobs = df_new_jobs.drop_duplicates()
 
     # Mirror everything we saw into the viewer DB (even if screening fails).
@@ -208,7 +239,13 @@ async def main_pipeline(
             df_new_filtered[col] = pd.NA
 
     say("Running job graph …")
-    df_results = await run_graph(df_new_filtered)
+
+    def _graph_stage(done: int, total: int, label: str) -> None:
+        stage({"stage": "screen", "done": done, "total": total, "label": label,
+               "msg": f"Screening jobs — {done}/{total}"})
+
+    df_results = await run_graph(df_new_filtered,
+                                 stage=_graph_stage if progress else None)
 
     # 5. Filter matches and exclude unwanted companies.
     percent_matches = round(

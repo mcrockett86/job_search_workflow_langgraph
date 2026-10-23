@@ -89,6 +89,9 @@ class RunState:
         self.error: str | None = None
         self.last_result: str | None = None
         self.profile: str | None = None
+        # Structured progress for the viewer's progress bar:
+        # {'stage': 'scrape'|'screen', 'done': int, 'total': int, 'label': str}
+        self.stage: dict[str, Any] | None = None
 
     def append(self, msg: str) -> None:
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -98,6 +101,10 @@ class RunState:
         if len(self.log) > 500:
             del self.log[: len(self.log) - 500]
 
+    def set_stage(self, info: dict[str, Any] | None) -> None:
+        with self.lock:
+            self.stage = info
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "running": self.running,
@@ -106,6 +113,7 @@ class RunState:
             "error": self.error,
             "last_result": self.last_result,
             "profile": self.profile,
+            "stage": self.stage,
             "log": self.log[-120:],
         }
 
@@ -121,8 +129,19 @@ def _run_pipeline_in_thread(profile_slug: str | None = None) -> None:
     run (URLs, resume, seen-job ledger, DB) then resolves to that profile.
     """
 
-    def progress(msg: str) -> None:
-        run_state.append(msg)
+    def progress(info) -> None:
+        # main_pipeline calls this with a dict for structured stage updates
+        # (drives the progress bar) and a plain string for log lines.
+        if isinstance(info, dict):
+            run_state.set_stage({
+                "stage": info.get("stage"),
+                "done": info.get("done"),
+                "total": info.get("total"),
+                "label": info.get("label"),
+            })
+        else:
+            run_state.set_stage(None)  # phase boundary — retire the bar
+            run_state.append(info)
 
     async def _go() -> None:
         from .job_finder import main_pipeline
@@ -153,6 +172,7 @@ def api_jobs(
     status: str = Query("all"),
     company: str | None = None,
     job_type: str | None = Query(None),
+    work_mode: str = Query("all", pattern="^(all|remote|hybrid|in_person|unknown)$"),
     search: str | None = None,
     min_salary: float | None = Query(None, ge=0),
     sort: str = Query("seen"),
@@ -160,7 +180,7 @@ def api_jobs(
     conn = _open_db()
     rows = db.list_jobs(
         conn, status=status, company=company, job_type=job_type,
-        search=search, min_salary=min_salary, sort=sort,
+        work_mode=work_mode, search=search, min_salary=min_salary, sort=sort,
     )
     # previews are large; the list only needs the short summary.
     for r in rows:
@@ -267,6 +287,7 @@ def _filtered_rows(request: Request) -> list[dict[str, Any]]:
         status=q.get("status", "all"),
         company=q.get("company") or None,
         job_type=q.get("job_type") or None,
+        work_mode=q.get("work_mode") or "all",
         search=q.get("search") or None,
         min_salary=float(q["min_salary"]) if q.get("min_salary") else None,
         sort=q.get("sort", "seen"),
@@ -287,7 +308,7 @@ def api_export(request: Request, format: str = Query("csv", pattern="^(csv|md)$"
             salary = _salary_str(r)
             buf.write(f"## {r.get('job_title') or 'Untitled'} — {r.get('company_name') or 'Unknown'}\n")
             buf.write(
-                f"- status: {r['status']} | type: {r.get('job_type') or '?'} | salary: {salary} | seen: {r['last_seen'][:10]}\n"
+                f"- status: {r['status']} | type: {r.get('job_type') or '?'} | work mode: {r.get('work_mode') or '?'} | salary: {salary} | seen: {r['last_seen'][:10]}\n"
             )
             if r.get("summary"):
                 buf.write(f"- summary: {r['summary']}\n")
@@ -298,10 +319,12 @@ def api_export(request: Request, format: str = Query("csv", pattern="^(csv|md)$"
     else:
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["job_title", "company_name", "job_type", "salary_min", "salary_max",
-                    "status", "summary", "last_seen", "job_url"])
+        w.writerow(["job_title", "company_name", "job_type", "work_mode",
+                    "salary_min", "salary_max", "status", "summary",
+                    "last_seen", "job_url"])
         for r in rows:
             w.writerow([r.get("job_title"), r.get("company_name"), r.get("job_type"),
+                        r.get("work_mode"),
                         r.get("salary_min"), r.get("salary_max"), r["status"],
                         r.get("summary"), r["last_seen"], r["job_url"]])
         body = buf.getvalue().encode()

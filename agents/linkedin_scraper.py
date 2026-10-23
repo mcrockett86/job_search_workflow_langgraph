@@ -346,6 +346,7 @@ def scrape_linkedin_job_urls(
     target_jobs_urls: list[str],
     max_pages: int = _DEFAULT_MAX_PAGES,
     headless: bool | None = None,
+    progress=None,
 ) -> pd.DataFrame:
     """Scrape recommended job URLs from LinkedIn.
 
@@ -395,7 +396,7 @@ def scrape_linkedin_job_urls(
                             "No LinkedIn sign-in completed — Run aborted. "
                             "Nothing was scraped."
                         )
-            seen_urls = _scrape_urls(driver, target_jobs_urls, max_pages)
+            seen_urls = _scrape_urls(driver, target_jobs_urls, max_pages, progress)
             cleaned = [u.split("/?")[0] for u in seen_urls]
             return pd.DataFrame({"job_url": cleaned})
         finally:
@@ -410,7 +411,7 @@ def scrape_linkedin_job_urls(
     try:
         # Login once — subsequent URLs stay logged in.
         _login(driver, email, password)
-        seen_urls = _scrape_urls(driver, target_jobs_urls, max_pages)
+        seen_urls = _scrape_urls(driver, target_jobs_urls, max_pages, progress)
     finally:
         driver.quit()
 
@@ -421,9 +422,16 @@ def scrape_linkedin_job_urls(
 
 
 def _scrape_urls(driver: "ChromeWebDriver", target_jobs_urls: list[str],
-                 max_pages: int) -> set[str]:
-    """Collect job URLs across all target search URLs (driver must be logged in)."""
+                 max_pages: int, progress=None) -> set[str]:
+    """Collect job URLs across all target search URLs (driver must be logged in).
+
+    ``progress(done, total, label)`` is called after every page so the web
+    viewer can show a scrape progress bar (done counts *URLs processed*,
+    total = urls × max_pages — an upper bound, since LinkedIn usually runs
+    out of pages early).
+    """
     seen_urls: set[str] = set()
+    total = max(len(target_jobs_urls) * max_pages, 1)
     for url_idx, target_url in enumerate(target_jobs_urls):
         logger.info("Scraping URL %d/%d …", url_idx + 1, len(target_jobs_urls))
         driver.get(target_url)
@@ -432,6 +440,9 @@ def _scrape_urls(driver: "ChromeWebDriver", target_jobs_urls: list[str],
         page_number = 1
         while page_number <= max_pages:
             print(f"Scraping page {page_number}…")
+            if progress:
+                progress(url_idx * max_pages + page_number - 1, total,
+                         f"search {url_idx + 1}/{len(target_jobs_urls)}, page {page_number}")
 
             # Retry up to _RETRY_ATTEMPTS times on transient failures.
             for attempt in range(1, _RETRY_ATTEMPTS + 1):

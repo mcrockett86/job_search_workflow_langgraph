@@ -34,6 +34,15 @@
             font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
             padding: 10px 12px; border-radius: 8px; max-height: 180px; overflow-y: auto;
             white-space: pre-wrap; }
+  #runbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  #runbar-track { flex: 1; height: 10px; background: #e2e8f0; border-radius: 999px;
+                  overflow: hidden; }
+  #runbar-fill { height: 100%; width: 0%; border-radius: 999px;
+                 background: linear-gradient(90deg, #6366f1, #22d3ee);
+                 transition: width .6s ease; }
+  #runbar-label { font-size: 12px; color: #475569; white-space: nowrap;
+                  font-variant-numeric: tabular-nums; }
+  .chip.mode { background: #ecfeff; color: #155e75; }
   main { max-width: 1100px; margin: 0 auto; padding: 18px 20px 60px; }
   .job { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
          padding: 14px 16px; margin-bottom: 12px; position: relative; }
@@ -120,6 +129,13 @@
     </select>
     <select id="f-company"><option value="">any company</option></select>
     <select id="f-type"><option value="">any type</option></select>
+    <select id="f-mode" title="Filter by work arrangement">
+      <option value="all">any work mode</option>
+      <option value="remote">remote</option>
+      <option value="hybrid">hybrid</option>
+      <option value="in_person">in person</option>
+      <option value="unknown">unknown</option>
+    </select>
     <input type="search" id="f-search" placeholder="search title / company / text…">
     <input type="number" id="f-salary" placeholder="min salary" min="0" step="1000">
     <select id="f-sort">
@@ -132,6 +148,10 @@
     <button class="secondary" id="export-md">Export MD</button>
     <button class="secondary" id="loginbtn" title="Sign LinkedIn into this profile (session saved; password never stored)">🔑 LinkedIn sign-in</button>
     <button class="secondary" id="cfgbtn" title="Set your resume and job-search URLs">⚙ Search settings</button>
+  </div>
+  <div id="runbar" style="display:none">
+    <div id="runbar-track"><div id="runbar-fill"></div></div>
+    <span id="runbar-label"></span>
   </div>
   <div id="runlog"></div>
 </header>
@@ -259,6 +279,7 @@ $('#profnew').onclick = async () => {
 function qs() {
   const p = new URLSearchParams();
   for (const [k, sel] of [["status","#f-status"],["company","#f-company"],["job_type","#f-type"],
+                          ["work_mode","#f-mode"],
                           ["search","#f-search"],["min_salary","#f-salary"],["sort","#f-sort"]]) {
     const v = $(sel).value.trim();
     if (v) p.set(k, v);
@@ -293,6 +314,7 @@ async function loadJobs() {
 }
 
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const MODE_LABEL = { remote: 'remote', hybrid: 'hybrid', in_person: 'in person' };
 function salary(r) {
   const lo = r.salary_min, hi = r.salary_max;
   if (lo && hi && lo !== hi) return `$${(+lo).toLocaleString()}–$${(+hi).toLocaleString()}`;
@@ -310,6 +332,7 @@ function render() {
     const seen = (j.last_seen || '').slice(0, 10);
     return `<div class="job" data-i="${i}">
       <span class="chip ${j.status}">${j.status}</span>
+      ${j.work_mode ? `<span class="chip mode">${MODE_LABEL[j.work_mode] || j.work_mode}</span>` : ''}
       <h2><a href="${esc(j.job_url)}" target="_blank" rel="noopener">${esc(title)}</a></h2>
       <div class="meta">${esc(comp)} ${j.job_type ? '· ' + esc(j.job_type) : ''} ${sal ? '· ' + sal : ''} · seen ${seen}</div>
       <div class="summary ${j.summary ? '' : 'empty'}">${j.summary ? esc(j.summary) : 'no summary yet — hover for preview'}</div>
@@ -413,21 +436,42 @@ async function pollRun() {
   const d = await r.json();
   $('#runlog').textContent = d.log.join('\n');
   $('#runlog').scrollTop = $('#runlog').scrollHeight;
+  renderRunBar(d);
   if (!d.running) {
     clearInterval(pollTimer); pollTimer = null;
     $('#runbtn').disabled = false;
+    $('#runbar').style.display = 'none';
     $('#runlog').textContent += d.error ? `\n✗ ${d.error}` : '\n✓ run finished';
     loadJobs(); loadFacets();
   }
 }
 
+// Progress bar: d.stage = {stage:'scrape'|'screen', done, total, label}
+function renderRunBar(d) {
+  const bar = $('#runbar'), fill = $('#runbar-fill'), label = $('#runbar-label');
+  const s = d.stage;
+  if (!d.running) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  if (!s || !s.total) {           // between phases — indeterminate pulse
+    fill.style.width = '100%';
+    fill.style.opacity = .35;
+    label.textContent = d.log.length ? d.log[d.log.length - 1].slice(11) : 'working…';
+    return;
+  }
+  fill.style.opacity = 1;
+  const pct = Math.min(100, Math.round((s.done / s.total) * 100));
+  fill.style.width = pct + '%';
+  const name = s.stage === 'scrape' ? 'Scraping LinkedIn' : 'Screening jobs';
+  label.textContent = `${name}: ${s.done}/${s.total} (${pct}%)`;
+}
+
 // ---- export ----------------------------------------------------------------
-$('#export-csv').onclick = () => location.href = purl('/api/export?format=csv&') + qs();
-$('#export-md').onclick  = () => location.href = purl('/api/export?format=md&') + qs();
+$('#export-csv').onclick = () => location.href = purl('/api/export?format=csv') + '&' + qs();
+$('#export-md').onclick  = () => location.href = purl('/api/export?format=md') + '&' + qs();
 
 // ---- wiring ----------------------------------------------------------------
 let debounce = null;
-['#f-status','#f-company','#f-type','#f-sort'].forEach(s =>
+['#f-status','#f-company','#f-type','#f-mode','#f-sort'].forEach(s =>
   $(s).addEventListener('change', () => { loadJobs(); loadFacets(); }));
 $('#f-search').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadJobs, 250); });
 $('#f-salary').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadJobs, 400); });
@@ -584,7 +628,19 @@ $('#login-shot').onclick = (e) => {
 
 // profile first: every data call carries ?profile=, so the selector,
 // storage, and the visible list must agree before the first paint.
-loadProfiles().then(() => { loadFacets(); loadJobs(); });
+loadProfiles().then(() => { loadFacets(); loadJobs(); resumeRunIfActive(); });
+async function resumeRunIfActive() {
+  try {
+    const r = await fetch('/api/run/status');
+    const d = await r.json();
+    if (d.running) {
+      $('#runbtn').disabled = true;
+      $('#runlog').style.display = 'block';
+      pollTimer = setInterval(pollRun, 1500);
+      pollRun();
+    }
+  } catch (e) { /* server not up yet */ }
+}
 </script>
 </body>
 </html>

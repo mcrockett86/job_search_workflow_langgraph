@@ -89,6 +89,56 @@ def test_export_csv_and_md(client):
     assert "link: http://x/a" in r.text
 
 
+def test_export_works_with_profile_and_filters(client):
+    """Regression: the viewer builds /api/export?format=csv&profile=…&… —
+    every separator must be a real '&' (a missing one 404'd both exports)."""
+    for fmt in ("csv", "md"):
+        r = client.get(f"/api/export?format={fmt}&profile=mike&status=all&sort=seen")
+        assert r.status_code == 200, f"{fmt} export 404'd (query-string bug?)"
+        assert "Data Scientist" in r.text
+
+
+def test_work_mode_filter_and_export(client):
+    conn = db.get_conn(profiles.get(profiles.default_slug()).db_path)
+    db.upsert_results(conn, [
+        {"job_url": "http://x/remote1", "is_match": True, "job_title": "Remote Eng",
+         "company_name": "Zeta", "job_description": "100% remote, work from anywhere"},
+        {"job_url": "http://x/hybrid1", "is_match": False, "job_title": "Hybrid Eng",
+         "company_name": "Zeta", "job_description": "hybrid, 3 days in the office"},
+        {"job_url": "http://x/onsite1", "is_match": True, "job_title": "Onsite Eng",
+         "company_name": "Zeta", "job_description": "on-site only, relocation assistance"},
+    ])
+    conn.close()
+
+    def urls(mode):
+        r = client.get("/api/jobs", params={"status": "all", "work_mode": mode})
+        assert r.status_code == 200
+        return {j["job_url"] for j in r.json()["jobs"]}
+
+    assert urls("remote") == {"http://x/remote1"}
+    assert urls("hybrid") == {"http://x/hybrid1"}
+    assert urls("in_person") == {"http://x/onsite1"}
+    assert "http://x/c" in urls("unknown")  # unscreened row with no text
+    assert len(urls("all")) == 6
+
+    # facet counts expose per-mode totals for the UI
+    counts = client.get("/api/facets").json()["counts"]
+    assert counts["mode_remote"] == 1
+    assert counts["mode_hybrid"] == 1
+    assert counts["mode_in_person"] == 1
+
+    # exports carry the work_mode column / line
+    r = client.get("/api/export", params={"format": "csv", "work_mode": "remote"})
+    assert r.status_code == 200
+    assert "work_mode" in r.text.splitlines()[0]
+    assert "Remote Eng" in r.text and "Hybrid Eng" not in r.text
+    r = client.get("/api/export", params={"format": "md", "work_mode": "hybrid"})
+    assert "work mode: hybrid" in r.text
+
+    # invalid mode is rejected, not silently ignored
+    assert client.get("/api/jobs", params={"work_mode": "beach"}).status_code == 422
+
+
 def test_run_requires_linkedin_session(client, monkeypatch):
     """No env creds and no saved per-profile session -> clear 400 pointing
     at the new in-browser sign-in."""
