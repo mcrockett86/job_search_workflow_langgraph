@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -218,7 +219,36 @@ def _setup_driver(headless: bool | None = None,
 
     driver_path = os.environ.get("CHROMEDRIVER_PATH") or None
     service = Service(executable_path=driver_path) if driver_path else Service()
-    return ChromeWebDriver(service=service, options=options)
+    driver = ChromeWebDriver(service=service, options=options)
+    # Best-effort: hide the headless fingerprint that trips LinkedIn's
+    # Cloudflare wall. Never let this break driver creation.
+    try:
+        _deheadless_ua(driver)
+    except Exception:  # noqa: BLE001
+        logger.debug("UA stealth skipped", exc_info=True)
+    return driver
+
+
+def _deheadless_ua(driver: "ChromeWebDriver") -> None:
+    """Hide the ``HeadlessChrome`` UA token that LinkedIn's Cloudflare wall
+    flags on fresh sessions (``Sorry, you have been blocked``).
+
+    Fixes BOTH surfaces Cloudflare cross-checks: the HTTP request header
+    (Network override) and the JS-visible ``navigator.userAgent`` (a script
+    evaluated on every new document). The replacement keeps the browser's
+    real version string, so header and JS never disagree — that mismatch is
+    itself a bot signal. No-op when the UA is already clean (headful runs).
+    """
+    ua = driver.execute_script("return navigator.userAgent")
+    if not ua or "HeadlessChrome" not in ua:
+        return
+    fixed = ua.replace("HeadlessChrome", "Chrome")
+    driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": fixed})
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator,'userAgent',"
+                   "{get:()=>%s});" % json.dumps(fixed)},
+    )
 
 
 def _login(driver: "WebDriver", email: str, password: str) -> None:
