@@ -17,11 +17,13 @@ from agents import profiles, web, web_login
 
 
 class FakeElement:
-    def __init__(self, visible=True):
+    def __init__(self, visible=True, text="", attrs=None):
         self.typed = []
         self.cleared = 0
         self.clicked = 0
         self._visible = visible
+        self.text = text
+        self.attrs = attrs or {}
 
     def clear(self):
         self.cleared += 1
@@ -37,6 +39,9 @@ class FakeElement:
 
     def is_enabled(self):
         return True
+
+    def get_attribute(self, name):
+        return self.attrs.get(name, "")
 
 
 class FakeDriver:
@@ -61,6 +66,10 @@ class FakeDriver:
         # hidden decoys that come first in DOM order
         self.email_hidden = FakeElement(visible=False)
         self.password_hidden = FakeElement(visible=False)
+        # LinkedIn checkpoint page with two verification options + Next
+        self.totp_option = FakeElement()          # authenticator app (by id)
+        self.email_option = FakeElement(text="Send to my email instead")
+        self.next_button = FakeElement(text="Next")
 
     # navigation / state -----------------------------------------------------
     def set_window_size(self, w, h):
@@ -94,6 +103,13 @@ class FakeDriver:
             return [self.password_visible]
         if "Sign in" in str(value) or value == "button[type='submit']":
             return [self.signin_visible]
+        # checkpoint page: options exist only once LinkedIn redirected there
+        if "checkpoint" in self.url:
+            if value in ("#totp-auth", "#app-to-phone-totp-auth",
+                         "#authenticator-app-auth", "#totp-auth-label"):
+                return [self.totp_option]
+            if value == web_login._SCAN_SELECTOR:
+                return [self.email_option, self.next_button]
         return []
 
     def find_element(self, by, value):
@@ -256,6 +272,94 @@ def test_bad_action_reports_but_keeps_session(env):
     assert sess.snapshot()["status"] == "waiting"  # still alive for a retry
 
 
+# ---------------------------------------------------------------------------
+# two-factor method toggle
+# ---------------------------------------------------------------------------
+def test_no_twofa_options_on_plain_login_page(env):
+    """The plain login form's 'Email or phone' label must NOT read as a
+    verification option — detection is gated to checkpoint pages."""
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    time.sleep(0.2)
+    snap = sess.snapshot()
+    assert snap["twofa_options"] == {}
+    assert snap["twofa_selected"] is None
+
+
+def test_twofa_options_detected_on_checkpoint_page(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    snap = sess.snapshot()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snap = sess.snapshot()
+        if snap["twofa_options"]:
+            break
+        time.sleep(0.05)
+    assert snap["twofa_options"] == {
+        "app": "Authenticator app", "email": "Email"}
+
+
+def test_twofa_select_clicks_option_and_continue(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    _wait_status("mike", "waiting")
+    web_login.enqueue("mike", "twofa", {"method": "app"})
+    deadline = time.time() + 5
+    while time.time() < deadline and not d.totp_option.clicked:
+        time.sleep(0.05)
+    assert d.totp_option.clicked >= 1
+    assert d.next_button.clicked >= 1          # Next pressed after the pick
+    snap = sess.snapshot()
+    assert snap["twofa_selected"] == "app"
+    assert "Authenticator app" in snap["message"]
+
+
+def test_twofa_toggle_off_clears_selection(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    web_login.enqueue("mike", "twofa", {"method": "app"})
+    deadline = time.time() + 5
+    while time.time() < deadline and sess.snapshot()["twofa_selected"] != "app":
+        time.sleep(0.05)
+    web_login.enqueue("mike", "twofa", {"method": ""})
+    deadline = time.time() + 5
+    while time.time() < deadline and sess.snapshot()["twofa_selected"] is not None:
+        time.sleep(0.05)
+    assert sess.snapshot()["twofa_selected"] is None
+
+
+def test_twofa_unavailable_method_reports_keeps_session(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    # push is not on the fake checkpoint page
+    web_login.enqueue("mike", "twofa", {"method": "push"})
+    deadline = time.time() + 5
+    while time.time() < deadline and "isn't offering" not in sess.snapshot()["message"]:
+        time.sleep(0.05)
+    assert sess.snapshot()["status"] == "waiting"   # still alive for a retry
+
+
+def test_twofa_selected_clears_when_page_moves_on(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    web_login.enqueue("mike", "twofa", {"method": "app"})
+    deadline = time.time() + 5
+    while time.time() < deadline and sess.snapshot()["twofa_selected"] != "app":
+        time.sleep(0.05)
+    d.url = "https://www.linkedin.com/uas/request-password-reset"  # left page
+    deadline = time.time() + 5
+    while time.time() < deadline and sess.snapshot()["twofa_selected"] is not None:
+        time.sleep(0.05)
+    assert sess.snapshot()["twofa_selected"] is None
+
+
 def test_sessions_are_per_profile(env):
     web_login.start("mike", "/tmp/x/mike")
     web_login.start("jen", "/tmp/x/jen")
@@ -308,6 +412,43 @@ def test_login_actions_without_session_are_409(client):
     r = client.post("/api/login/credentials?profile=jen",
                     json={"email": "a@b.c", "password": "x"})
     assert r.status_code == 409
+    r = client.post("/api/login/twofa?profile=jen", json={"method": "app"})
+    assert r.status_code == 409
+
+
+def test_twofa_endpoint_flow(client, env):
+    client.post("/api/login/start?profile=mike")
+    _wait_status("mike", "waiting")
+    env["drivers"][0].url = "https://www.linkedin.com/checkpoint/challenge/x"
+    d: dict = {}
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        d = client.get("/api/login/status?profile=mike").json()
+        if d["twofa_options"]:
+            break
+        time.sleep(0.05)
+    assert d["twofa_options"]["app"] == "Authenticator app"
+
+    r = client.post("/api/login/twofa?profile=mike", json={"method": "app"})
+    assert r.status_code == 200
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        d = client.get("/api/login/status?profile=mike").json()
+        if d["twofa_selected"] == "app":
+            break
+        time.sleep(0.05)
+    assert d["twofa_selected"] == "app"
+
+    # toggle off
+    r = client.post("/api/login/twofa?profile=mike", json={"method": ""})
+    assert r.status_code == 200
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        d = client.get("/api/login/status?profile=mike").json()
+        if d["twofa_selected"] is None:
+            break
+        time.sleep(0.05)
+    assert d["twofa_selected"] is None
 
 
 def test_login_status_is_scoped_per_profile(client, env):

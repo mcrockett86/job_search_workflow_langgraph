@@ -373,6 +373,10 @@ class LoginClick(BaseModel):
     y: int
 
 
+class LoginTwoFA(BaseModel):
+    method: str = ""   # "" clears the selection; else a web_login method key
+
+
 def _login_slug() -> str:
     return profiles.current_slug()
 
@@ -428,6 +432,16 @@ def api_login_click(body: LoginClick) -> JSONResponse:
     if sess is None:
         raise HTTPException(status_code=409, detail="No active sign-in session")
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/login/twofa")
+def api_login_twofa(body: LoginTwoFA) -> JSONResponse:
+    """Pick (or clear) a two-factor verification method on LinkedIn's page.
+    Available options and the current pick ride along in /api/login/status."""
+    sess = web_login.enqueue(_login_slug(), "twofa", {"method": body.method})
+    if sess is None:
+        raise HTTPException(status_code=409, detail="No active sign-in session")
+    return JSONResponse({"ok": True, **sess.snapshot()})
 
 
 @app.post("/api/login/cancel")

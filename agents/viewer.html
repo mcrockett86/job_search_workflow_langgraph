@@ -95,6 +95,11 @@
   #login-shot-wrap { margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 10px;
                      overflow: hidden; background: #0f172a; display: none; }
   #login-shot { display: block; width: 100%; height: auto; cursor: crosshair; }
+  #login-twofa-chips .chip { padding: 6px 12px; border: 1px solid #cbd5e1;
+    border-radius: 999px; background: #fff; font-size: 13px; cursor: pointer; }
+  #login-twofa-chips .chip:hover { border-color: var(--accent); }
+  #login-twofa-chips .chip.on { background: var(--accent); color: #fff;
+    border-color: var(--accent); font-weight: 600; }
   #cfgmodal .panel { position: absolute; right: 0; top: 0; bottom: 0;
                      width: min(560px, 94vw); background: #fff; padding: 22px 24px;
                      overflow-y: auto; box-shadow: -8px 0 30px rgba(15,23,42,.25); }
@@ -224,6 +229,10 @@
       <button id="login-submit">Sign in on LinkedIn</button>
     </div>
     <div class="hint">2FA or a challenge on the page? Click the picture to focus the field, then type below:</div>
+    <div id="login-twofa" style="display:none">
+      <div class="hint" style="margin-bottom:2px">Verification method — LinkedIn is offering:</div>
+      <div class="row" id="login-twofa-chips"></div>
+    </div>
     <div class="row">
       <input type="text" id="login-extra" placeholder="type into the page (codes, text…)" style="flex:1 1 220px">
       <button class="secondary" id="login-send">Send</button>
@@ -558,22 +567,53 @@ async function pollLogin() {
   if (!d.active) {
     $('#login-status').textContent = 'not started';
     $('#login-shot-wrap').style.display = 'none';
+    $('#login-twofa').style.display = 'none';
     if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
     return;
   }
   $('#login-status').textContent = `${d.message}  ·  page: ${d.url_host || '…'}  ·  ${d.elapsed}s`;
+  renderTwoFA(d);
   if (d.screenshot) {
     $('#login-shot-wrap').style.display = 'block';
     $('#login-shot').src = 'data:image/png;base64,' + d.screenshot;
   }
   if (d.status === 'success') {
     if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+    $('#login-twofa').style.display = 'none';
     loginMsg('Signed in for ' + prof() + ' — you can close this and hit ▶ Run new scan.', true);
     $('#login-email').value = ''; $('#login-password').value = '';
     $('#login-extra').value = '';
   } else if (d.status === 'failed' || d.status === 'cancelled') {
     if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+    $('#login-twofa').style.display = 'none';
     loginMsg(d.message, false);
+  }
+}
+// Two-factor method toggle: LinkedIn's checkpoint page lists the options it
+// offers (authenticator app, SMS, email, app notification). Chips appear
+// whenever the relayed page shows them; clicking one picks that method on
+// LinkedIn's page, clicking the active chip again clears the selection.
+function renderTwoFA(d) {
+  const wrap = $('#login-twofa');
+  const box = $('#login-twofa-chips');
+  const opts = d.twofa_options || {};
+  const keys = Object.keys(opts);
+  if (!keys.length) { wrap.style.display = 'none'; box.innerHTML = ''; return; }
+  wrap.style.display = 'block';
+  box.innerHTML = '';
+  for (const k of keys) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip' + (d.twofa_selected === k ? ' on' : '');
+    b.textContent = opts[k];
+    b.onclick = async () => {
+      const next = d.twofa_selected === k ? '' : k;   // toggle off if active
+      b.disabled = true;
+      const r = await loginPost('/api/login/twofa', { method: next });
+      b.disabled = false;
+      if (r) setTimeout(pollLogin, 600);
+    };
+    box.appendChild(b);
   }
 }
 $('#loginbtn').onclick = async () => {
