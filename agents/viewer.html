@@ -100,6 +100,9 @@
   #login-twofa-chips .chip:hover { border-color: var(--accent); }
   #login-twofa-chips .chip.on { background: var(--accent); color: #fff;
     border-color: var(--accent); font-weight: 600; }
+  #login-codesent { display: none; margin-top: 10px; padding: 10px 12px;
+    border: 1px solid #a7f3d0; background: #ecfdf5; color: #065f46;
+    border-radius: 10px; font-size: 13.5px; font-weight: 600; }
   #cfgmodal .panel { position: absolute; right: 0; top: 0; bottom: 0;
                      width: min(560px, 94vw); background: #fff; padding: 22px 24px;
                      overflow-y: auto; box-shadow: -8px 0 30px rgba(15,23,42,.25); }
@@ -233,6 +236,7 @@
       <div class="hint" style="margin-bottom:2px">Verification method — LinkedIn is offering:</div>
       <div class="row" id="login-twofa-chips"></div>
     </div>
+    <div id="login-codesent" role="status" aria-live="polite"></div>
     <div class="row">
       <input type="text" id="login-extra" placeholder="type into the page (codes, text…)" style="flex:1 1 220px">
       <button class="secondary" id="login-send">Send</button>
@@ -568,11 +572,13 @@ async function pollLogin() {
     $('#login-status').textContent = 'not started';
     $('#login-shot-wrap').style.display = 'none';
     $('#login-twofa').style.display = 'none';
+    $('#login-codesent').style.display = 'none';
     if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
     return;
   }
   $('#login-status').textContent = `${d.message}  ·  page: ${d.url_host || '…'}  ·  ${d.elapsed}s`;
   renderTwoFA(d);
+  renderCodeSent(d);
   if (d.screenshot) {
     $('#login-shot-wrap').style.display = 'block';
     $('#login-shot').src = 'data:image/png;base64,' + d.screenshot;
@@ -580,12 +586,14 @@ async function pollLogin() {
   if (d.status === 'success') {
     if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
     $('#login-twofa').style.display = 'none';
+    $('#login-codesent').style.display = 'none';
     loginMsg('Signed in for ' + prof() + ' — you can close this and hit ▶ Run new scan.', true);
     $('#login-email').value = ''; $('#login-password').value = '';
     $('#login-extra').value = '';
   } else if (d.status === 'failed' || d.status === 'cancelled') {
     if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
     $('#login-twofa').style.display = 'none';
+    $('#login-codesent').style.display = 'none';
     loginMsg(d.message, false);
   }
 }
@@ -614,6 +622,22 @@ function renderTwoFA(d) {
       if (r) setTimeout(pollLogin, 600);
     };
     box.appendChild(b);
+  }
+}
+// 'Code sent' banner: LinkedIn's checkpoint page confirmed a verification
+// code is on its way, so the user knows to go check their phone/email.
+// The notice text comes from the server (destination only as LinkedIn
+// itself masks it); aria-live announces it when it appears.
+function renderCodeSent(d) {
+  const b = $('#login-codesent');
+  if (d.code_sent && d.code_notice) {
+    if (b.textContent !== d.code_notice) b.textContent = d.code_notice;
+    b.style.display = 'block';
+    $('#login-extra').placeholder = 'enter the code LinkedIn sent…';
+  } else {
+    b.style.display = 'none';
+    b.textContent = '';
+    $('#login-extra').placeholder = 'type into the page (codes, text…)';
   }
 }
 $('#loginbtn').onclick = async () => {

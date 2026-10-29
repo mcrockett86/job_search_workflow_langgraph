@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import logging
 import queue
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -76,6 +77,34 @@ TWOFA_METHODS: dict[str, dict] = {
 _SCAN_SELECTOR = "button, a, label, span[role='button'], input[type='submit']"
 # Buttons that submit the chosen method once selected.
 _CONTINUE_TEXTS = ("next", "send", "submit", "continue", "get a code")
+
+# LinkedIn's confirmation that a verification code is on its way. Matched
+# against the checkpoint page's visible body text.
+_CODE_SENT_PHRASES = (
+    "we sent a code", "we've sent a code", "we have sent a code",
+    "code sent", "sent a code", "sent you a code", "code is on its way",
+    "enter the code", "enter code", "check your text", "check your email",
+    "check your messages", "texted you", "emailed you", "sent to your",
+)
+# Masked destinations LinkedIn prints (e.g. "(***) ***-1234", "jo**@gm…**").
+# Only strings that are ALREADY masked by LinkedIn are ever shown to the
+# user — a span must contain '*' to qualify.
+_MASKED_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]*\*+[A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_SPAN_RE = re.compile(r"[\d()+\-*\s]{7,}")
+_ENDING_IN_RE = re.compile(r"\bending(?:\s+in)?\s+\*[\w*]{1,7}\b", re.I)
+
+
+def _masked_destination(body: str) -> str | None:
+    """LinkedIn's own masked delivery target from the page text, if any."""
+    m = _MASKED_EMAIL_RE.search(body)
+    if m:
+        return m.group(0)
+    for span in _PHONE_SPAN_RE.findall(body):
+        if "*" in span and sum(c.isdigit() for c in span) >= 2:
+            return span.strip(" -+")
+    m = _ENDING_IN_RE.search(body)
+    return m.group(0) if m else None
 
 
 def _visible_texts(driver) -> list:
@@ -140,6 +169,30 @@ def _on_twofa_page(url: str) -> bool:
     return "checkpoint" in u or "/auth/" in u
 
 
+def detect_code_sent(driver) -> str | None:
+    """Return a user-facing notice when the page confirms a verification
+    code was sent, else None.
+
+    Includes the destination ONLY as LinkedIn itself prints it (already
+    masked, e.g. "(***) ***-1234") — never a raw value from the page.
+    """
+    if not _on_twofa_page(getattr(driver, "current_url", "") or ""):
+        return None
+    try:
+        body = driver.find_element("css selector", "body").text or ""
+    except Exception:  # noqa: BLE001 — page mid-navigation
+        return None
+    low = body.lower()
+    if not any(p in low for p in _CODE_SENT_PHRASES):
+        return None
+    notice = "LinkedIn says a verification code was sent — check your messages."
+    dest = _masked_destination(body)
+    if dest:
+        notice = (f"LinkedIn sent a verification code to {dest}"
+                  " — check your messages and enter it below.")
+    return notice
+
+
 def detect_twofa(driver) -> dict[str, str]:
     """Map of method-key -> label for every 2FA option visible on the page.
 
@@ -179,6 +232,8 @@ class LoginSession:
         self.message = "Opening LinkedIn sign-in page…"
         self.twofa_options: dict[str, str] = {}   # method key -> label
         self.twofa_selected: str | None = None    # method key the user picked
+        self.code_sent: bool = False              # page confirmed a code went out
+        self.code_notice: str | None = None       # user-facing "expect a code" text
         self.created_at = time.time()
         self.last_action_at = time.time()
         self.stop = threading.Event()
@@ -196,6 +251,8 @@ class LoginSession:
                 "screenshot": self.screenshot_b64,
                 "twofa_options": dict(self.twofa_options),
                 "twofa_selected": self.twofa_selected,
+                "code_sent": self.code_sent,
+                "code_notice": self.code_notice,
                 "elapsed": round(time.time() - self.created_at),
             }
 
@@ -303,6 +360,13 @@ def _worker(sess: LoginSession) -> None:
                 sess.twofa_options = opts
                 if sess.twofa_selected and sess.twofa_selected not in opts:
                     sess.twofa_selected = None   # page moved past that choice
+                try:
+                    notice = detect_code_sent(driver)
+                except Exception:  # noqa: BLE001 — never break the stream
+                    notice = None
+                if notice:
+                    sess.code_sent = True        # latch: the code IS coming
+                    sess.code_notice = notice
             if _logged_in(url):
                 with sess.lock:
                     sess.status = "success"
@@ -409,6 +473,10 @@ def _apply(action: str, payload: dict, driver,
         if sess is not None:
             with sess.lock:
                 sess.twofa_selected = method or None
+                if method:
+                    # a fresh pick sends a fresh code — re-arm the notice
+                    sess.code_sent = False
+                    sess.code_notice = None
         if not method:
             return
         if method not in TWOFA_METHODS:
@@ -423,8 +491,8 @@ def _apply(action: str, payload: dict, driver,
         if sess is not None:
             with sess.lock:
                 sess.message = (
-                    f"Chose {TWOFA_METHODS[method]['label']} — watch the "
-                    "picture for the code prompt.")
+                    f"Chose {TWOFA_METHODS[method]['label']} — LinkedIn is "
+                    "sending a code; watch the picture for confirmation.")
 
     else:
         raise ValueError(f"Unknown action: {action}")

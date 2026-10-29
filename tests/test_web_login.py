@@ -70,6 +70,8 @@ class FakeDriver:
         self.totp_option = FakeElement()          # authenticator app (by id)
         self.email_option = FakeElement(text="Send to my email instead")
         self.next_button = FakeElement(text="Next")
+        # visible body text of the current page (detect_code_sent reads it)
+        self.body_text = ""
 
     # navigation / state -----------------------------------------------------
     def set_window_size(self, w, h):
@@ -113,6 +115,8 @@ class FakeDriver:
         return []
 
     def find_element(self, by, value):
+        if value == "body":
+            return FakeElement(text=self.body_text)
         els = self.find_elements(by, value)
         return els[0] if els else FakeElement()
 
@@ -358,6 +362,97 @@ def test_twofa_selected_clears_when_page_moves_on(env):
     while time.time() < deadline and sess.snapshot()["twofa_selected"] is not None:
         time.sleep(0.05)
     assert sess.snapshot()["twofa_selected"] is None
+
+
+# ---------------------------------------------------------------------------
+# 'code sent' notice
+# ---------------------------------------------------------------------------
+def test_code_sent_detected_with_masked_destination(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    d.body_text = ("Enter the code we sent to (***) ***-1234. "
+                   "It may take a minute to arrive.")
+    snap = sess.snapshot()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snap = sess.snapshot()
+        if snap["code_sent"]:
+            break
+        time.sleep(0.05)
+    assert snap["code_sent"] is True
+    assert "(***) ***-1234" in snap["code_notice"]
+
+
+def test_code_sent_generic_notice_without_destination(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    d.body_text = "Check your messages and enter the code."
+    snap = sess.snapshot()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snap = sess.snapshot()
+        if snap["code_sent"]:
+            break
+        time.sleep(0.05)
+    assert snap["code_sent"] is True
+    assert "verification code was sent" in snap["code_notice"]
+
+
+def test_code_sent_not_detected_on_plain_login(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.body_text = "Enter the code we sent to (***) ***-1234"  # even if present
+    time.sleep(0.2)
+    snap = sess.snapshot()
+    assert snap["code_sent"] is False          # gated to checkpoint pages
+    assert snap["code_notice"] is None
+
+
+def test_code_sent_latches_and_rearms_on_new_pick(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    d.body_text = "We sent a code to jo**@example.com"
+    deadline = time.time() + 5
+    while time.time() < deadline and not sess.snapshot()["code_sent"]:
+        time.sleep(0.05)
+    assert sess.snapshot()["code_sent"] is True
+    # page moves past the confirmation: the latch keeps the notice visible
+    d.body_text = "Enter the 6-digit code"
+    d.body_text = ""
+    time.sleep(0.2)
+    assert sess.snapshot()["code_sent"] is True
+    # choosing another method sends a fresh code: re-arm to 'not yet sent'
+    web_login.enqueue("mike", "twofa", {"method": "app"})
+    deadline = time.time() + 5
+    while time.time() < deadline and sess.snapshot()["code_sent"]:
+        time.sleep(0.05)
+    assert sess.snapshot()["code_sent"] is False
+
+
+def test_code_sent_never_leaks_unmasked_destination(env):
+    """A page that prints a FULL phone/email must not echo it into the
+    notice — only LinkedIn's own masked strings are ever shown."""
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    d.body_text = "We sent a code. Delivery target: 555-867-5309"
+    snap = sess.snapshot()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        snap = sess.snapshot()
+        if snap["code_sent"]:
+            break
+        time.sleep(0.05)
+    assert snap["code_sent"] is True
+    assert "555-867-5309" not in snap["code_notice"]
 
 
 def test_sessions_are_per_profile(env):
