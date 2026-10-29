@@ -162,6 +162,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(web_login, "_make_driver", factory)
     monkeypatch.setattr(web_login, "POLL_SECONDS", 0.05)
     monkeypatch.setattr(web_login, "IDLE_TIMEOUT", 30)
+    monkeypatch.setattr(web_login, "CODE_WAIT_TIMEOUT", 60)
     # no stale sessions from other tests
     web_login.SESSIONS.clear()
     yield {"root": root, "drivers": made}
@@ -453,6 +454,67 @@ def test_code_sent_never_leaks_unmasked_destination(env):
         time.sleep(0.05)
     assert snap["code_sent"] is True
     assert "555-867-5309" not in snap["code_notice"]
+
+
+# ---------------------------------------------------------------------------
+# code-wait grace: a confirmed-sent code extends the idle budget
+# ---------------------------------------------------------------------------
+def test_session_survives_past_idle_while_code_pending(env):
+    """Regression (jen's VPS failure): email codes can take minutes; the
+    idle timer must NOT cancel a session that is waiting on a confirmed
+    code. Backdate the confirmation past IDLE_TIMEOUT — the old code would
+    have cancelled here."""
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    d.body_text = "We sent a code to (***) ***-1234"
+    deadline = time.time() + 5
+    while time.time() < deadline and not sess.snapshot()["code_sent"]:
+        time.sleep(0.05)
+    assert sess.snapshot()["code_sent"] is True
+    # pretend the confirmation happened long after the last click and
+    # longer ago than IDLE_TIMEOUT (30s in tests)
+    with sess.lock:
+        sess.last_action_at = time.time() - 40
+        sess.code_sent_at = time.time() - 35
+    time.sleep(0.5)
+    assert sess.snapshot()["status"] == "waiting"   # grace, not idle-cancel
+
+
+def test_code_wait_eventually_expires_with_clear_message(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    d.body_text = "We sent a code to (***) ***-1234"
+    deadline = time.time() + 5
+    while time.time() < deadline and not sess.snapshot()["code_sent"]:
+        time.sleep(0.05)
+    with sess.lock:
+        # grace (60s) over, and no user action since either
+        sess.code_sent_at = time.time() - 61
+        sess.last_action_at = time.time() - 61
+    _wait_status("mike", "cancelled")
+    msg = sess.snapshot()["message"]
+    assert "verification code" in msg and "resend" in msg
+
+
+def test_typing_while_waiting_for_code_extends_grace(env):
+    sess = web_login.start("mike", "/tmp/x/mike")
+    _wait_status("mike", "waiting")
+    d = env["drivers"][0]
+    d.url = "https://www.linkedin.com/checkpoint/challenge/abc"
+    d.body_text = "We sent a code to (***) ***-1234"
+    deadline = time.time() + 5
+    while time.time() < deadline and not sess.snapshot()["code_sent"]:
+        time.sleep(0.05)
+    # confirmation is old, but the user just typed: anchor = last_action
+    web_login.enqueue("mike", "text", {"text": "123456"})
+    with sess.lock:
+        sess.code_sent_at = time.time() - 60
+    time.sleep(0.5)
+    assert sess.snapshot()["status"] == "waiting"
 
 
 def test_sessions_are_per_profile(env):
