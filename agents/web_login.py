@@ -31,8 +31,13 @@ logger = logging.getLogger(__name__)
 
 # Tunables (tests shrink the poll interval).
 POLL_SECONDS = 1.5
-TOTAL_TIMEOUT = 600          # hard cap for one sign-in session
-IDLE_TIMEOUT = 300           # drop the browser if the user walks away
+TOTAL_TIMEOUT = 1200         # hard cap for one sign-in session
+IDLE_TIMEOUT = 600           # drop the browser if the user walks away
+# Once LinkedIn confirms a code was sent, the user is legitimately waiting
+# on an email/SMS that can take minutes: the idle timer switches to this
+# (longer) budget, measured from the confirmation, so a slow code no longer
+# kills the session mid-wait.
+CODE_WAIT_TIMEOUT = 900
 WINDOW = (1280, 900)
 
 # Test seam: (profile_dir) -> WebDriver. Monkeypatched in unit tests.
@@ -234,6 +239,7 @@ class LoginSession:
         self.twofa_selected: str | None = None    # method key the user picked
         self.code_sent: bool = False              # page confirmed a code went out
         self.code_notice: str | None = None       # user-facing "expect a code" text
+        self.code_sent_at: float | None = None    # when the confirmation was seen
         self.created_at = time.time()
         self.last_action_at = time.time()
         self.stop = threading.Event()
@@ -365,8 +371,12 @@ def _worker(sess: LoginSession) -> None:
                 except Exception:  # noqa: BLE001 — never break the stream
                     notice = None
                 if notice:
+                    first = not sess.code_sent
                     sess.code_sent = True        # latch: the code IS coming
                     sess.code_notice = notice
+                    if first:
+                        # grace starts at the confirmation, not the last click
+                        sess.code_sent_at = time.time()
             if _logged_in(url):
                 with sess.lock:
                     sess.status = "success"
@@ -374,10 +384,25 @@ def _worker(sess: LoginSession) -> None:
                                     "profile — Run new scan now works unattended.")
                 logger.info("LinkedIn web sign-in completed for profile %s", sess.slug)
                 return
-            if time.time() - sess.last_action_at > IDLE_TIMEOUT:
+            # Idle budget: normally from the last user action; once a code
+            # was confirmed sent, from the confirmation (or any later user
+            # action) with the longer CODE_WAIT_TIMEOUT — email/SMS codes
+            # can take minutes. TOTAL_TIMEOUT still caps the whole session.
+            with sess.lock:
+                code_at = sess.code_sent_at if sess.code_sent else None
+            if code_at:
+                anchor = max(code_at, sess.last_action_at)
+                expired = time.time() - anchor > CODE_WAIT_TIMEOUT
+            else:
+                expired = time.time() - sess.last_action_at > IDLE_TIMEOUT
+            if expired:
                 with sess.lock:
                     sess.status = "cancelled"
-                    sess.message = "Timed out waiting for you — nothing was saved."
+                    sess.message = (
+                        "Waited for the verification code and it never "
+                        "arrived — nothing was saved. Pick the method again "
+                        "to have LinkedIn resend." if code_at else
+                        "Timed out waiting for you — nothing was saved.")
                 return
             time.sleep(POLL_SECONDS)
         with sess.lock:
@@ -477,6 +502,7 @@ def _apply(action: str, payload: dict, driver,
                     # a fresh pick sends a fresh code — re-arm the notice
                     sess.code_sent = False
                     sess.code_notice = None
+                    sess.code_sent_at = None
         if not method:
             return
         if method not in TWOFA_METHODS:
