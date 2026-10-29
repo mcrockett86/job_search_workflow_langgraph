@@ -40,6 +40,133 @@ def _make_driver(profile_dir: str):
     return ls._setup_driver(headless=True, profile_dir=profile_dir)  # noqa: SLF001
 
 
+# ---------------------------------------------------------------------------
+# Two-factor verification methods LinkedIn may offer on its checkpoint page.
+# Each method is located by element id first (LinkedIn's stable ids), then by
+# visible text as a layout-change fallback.
+# ---------------------------------------------------------------------------
+TWOFA_METHODS: dict[str, dict] = {
+    "app": {
+        "label": "Authenticator app",
+        "ids": ("#totp-auth", "#app-to-phone-totp-auth",
+                "#authenticator-app-auth", "#totp-auth-label"),
+        "phrases": ("authenticator", "verification code from an app"),
+    },
+    "sms": {
+        "label": "Text message (SMS)",
+        "ids": ("#app-to-phone-sms-auth", "#register-phone-auth",
+                "#sms-auth", "#app-to-phone-sms-auth-label"),
+        "phrases": ("text message", "text me", "sms"),
+    },
+    "email": {
+        "label": "Email",
+        "ids": ("#app-to-phone-email-auth", "#email-app-login",
+                "#email-auth", "#app-to-phone-email-auth-label"),
+        "phrases": ("email",),
+    },
+    "push": {
+        "label": "LinkedIn app notification",
+        "ids": ("#push-notifications-auth", "#push-auth",
+                "#push-notifications-auth-label"),
+        "phrases": ("mobile app", "notification", "push"),
+    },
+}
+
+# Visible controls scanned for the text fallback.
+_SCAN_SELECTOR = "button, a, label, span[role='button'], input[type='submit']"
+# Buttons that submit the chosen method once selected.
+_CONTINUE_TEXTS = ("next", "send", "submit", "continue", "get a code")
+
+
+def _visible_texts(driver) -> list:
+    from selenium.webdriver.common.by import By
+    out = []
+    try:
+        els = driver.find_elements(By.CSS_SELECTOR, _SCAN_SELECTOR)
+    except Exception:  # noqa: BLE001 — odd page variant
+        return out
+    for el in els:
+        try:
+            if el.is_displayed():
+                out.append(el)
+        except Exception:  # noqa: BLE001 — stale node
+            continue
+    return out
+
+
+def _element_text(el) -> str:
+    try:
+        txt = (el.text or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        txt = ""
+    if not txt:
+        try:
+            txt = (el.get_attribute("aria-label") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            txt = ""
+    if not txt:
+        try:
+            txt = (el.get_attribute("value") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            txt = ""
+    return txt
+
+
+def _find_twofa_option(driver, cfg: dict):
+    """Locate the visible control that selects a 2FA method (ids, then text)."""
+    from selenium.webdriver.common.by import By
+    for sel in cfg["ids"]:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+        except Exception:  # noqa: BLE001
+            continue
+        for el in els:
+            try:
+                if el.is_displayed():
+                    return el
+            except Exception:  # noqa: BLE001
+                continue
+    for el in _visible_texts(driver):
+        txt = _element_text(el)
+        if txt and any(p in txt for p in cfg["phrases"]):
+            return el
+    return None
+
+
+def _on_twofa_page(url: str) -> bool:
+    """True on LinkedIn's verification/checkpoint pages (never the plain
+    login form, whose 'Email or phone' label would trip the text fallback)."""
+    u = url or ""
+    return "checkpoint" in u or "/auth/" in u
+
+
+def detect_twofa(driver) -> dict[str, str]:
+    """Map of method-key -> label for every 2FA option visible on the page.
+
+    Cheap by design: runs every poll tick, so id lookups come first and the
+    text scan only runs when no id matched.
+    """
+    if not _on_twofa_page(getattr(driver, "current_url", "") or ""):
+        return {}
+    found: dict[str, str] = {}
+    for key, cfg in TWOFA_METHODS.items():
+        if _find_twofa_option(driver, cfg) is not None:
+            found[key] = cfg["label"]
+    return found
+
+
+def _click_continue(driver) -> None:
+    """Best-effort: press the page's Next/Send/Submit after a method pick."""
+    for el in _visible_texts(driver):
+        txt = _element_text(el)
+        if txt in _CONTINUE_TEXTS:
+            try:
+                el.click()
+                return
+            except Exception:  # noqa: BLE001 — LinkedIn may auto-submit
+                return
+
+
 class LoginSession:
     def __init__(self, slug: str, profile_dir: str) -> None:
         self.slug = slug
@@ -50,6 +177,8 @@ class LoginSession:
         self.url: str = ""
         self.status = "starting"   # starting | waiting | success | failed | cancelled
         self.message = "Opening LinkedIn sign-in page…"
+        self.twofa_options: dict[str, str] = {}   # method key -> label
+        self.twofa_selected: str | None = None    # method key the user picked
         self.created_at = time.time()
         self.last_action_at = time.time()
         self.stop = threading.Event()
@@ -65,6 +194,8 @@ class LoginSession:
                 "message": self.message,
                 "url_host": _host(self.url),
                 "screenshot": self.screenshot_b64,
+                "twofa_options": dict(self.twofa_options),
+                "twofa_selected": self.twofa_selected,
                 "elapsed": round(time.time() - self.created_at),
             }
 
@@ -165,6 +296,13 @@ def _worker(sess: LoginSession) -> None:
             with sess.lock:
                 sess.screenshot_b64 = base64.b64encode(png).decode()
                 sess.url = url
+                try:
+                    opts = detect_twofa(driver)
+                except Exception:  # noqa: BLE001 — never break the stream
+                    opts = {}
+                sess.twofa_options = opts
+                if sess.twofa_selected and sess.twofa_selected not in opts:
+                    sess.twofa_selected = None   # page moved past that choice
             if _logged_in(url):
                 with sess.lock:
                     sess.status = "success"
@@ -208,13 +346,14 @@ def _drain(sess: LoginSession, driver) -> None:
         except queue.Empty:
             return
         try:
-            _apply(action, payload, driver)
+            _apply(action, payload, driver, sess)
         except Exception as exc:  # noqa: BLE001 — report, keep the session alive
             with sess.lock:
                 sess.message = f"That didn't work ({type(exc).__name__}: {exc}). Try again."
 
 
-def _apply(action: str, payload: dict, driver) -> None:
+def _apply(action: str, payload: dict, driver,
+           sess: "LoginSession | None" = None) -> None:
     """Apply one user action to the live LinkedIn page.
 
     SECURITY: 'credentials' carries the password. Do not log it, echo it,
@@ -261,6 +400,31 @@ def _apply(action: str, payload: dict, driver) -> None:
             driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
                 "type": etype, "x": x, "y": y,
                 "button": "left", "clickCount": 1})
+
+    elif action == "twofa":
+        # Toggle a two-factor verification method on LinkedIn's checkpoint
+        # page. method='' clears the selection (no click); a method key clicks
+        # that option so LinkedIn shows its code entry / sends the code.
+        method = (payload.get("method") or "").strip().lower()
+        if sess is not None:
+            with sess.lock:
+                sess.twofa_selected = method or None
+        if not method:
+            return
+        if method not in TWOFA_METHODS:
+            raise ValueError("Unknown verification method.")
+        el = _find_twofa_option(driver, TWOFA_METHODS[method])
+        if el is None:
+            raise ValueError(
+                f"LinkedIn isn't offering “{TWOFA_METHODS[method]['label']}” "
+                "on this page right now.")
+        el.click()
+        _click_continue(driver)
+        if sess is not None:
+            with sess.lock:
+                sess.message = (
+                    f"Chose {TWOFA_METHODS[method]['label']} — watch the "
+                    "picture for the code prompt.")
 
     else:
         raise ValueError(f"Unknown action: {action}")
