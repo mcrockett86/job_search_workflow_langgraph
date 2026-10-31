@@ -681,12 +681,19 @@ $('#login-cancel').onclick = async () => {
   await loginPost('/api/login/cancel');
   loginMsg('Sign-in cancelled — nothing was saved.', false);
 };
-// Click the relayed page: scale viewport coords to the 1280x900 server window.
+// Click the relayed page: scale click coords to the screenshot's REAL size.
+// The PNG is the browser's viewport (1280 wide, but its height is whatever
+// the window's content area actually is — e.g. 813 in headless Chrome, not
+// the 900 we asked for). Scaling by the image's intrinsic pixel size maps
+// image px -> viewport CSS px exactly; the old hardcoded 1280x900 pushed
+// every click ~10% too low, which missed buttons near the page bottom
+// (LinkedIn's "Send me a code").
 $('#login-shot').onclick = (e) => {
   const img = $('#login-shot');
   const rect = img.getBoundingClientRect();
-  const x = Math.round((e.clientX - rect.left) * (1280 / rect.width));
-  const y = Math.round((e.clientY - rect.top) * (900 / rect.height));
+  const natW = img.naturalWidth || 1280, natH = img.naturalHeight || 900;
+  const x = Math.round((e.clientX - rect.left) * (natW / rect.width));
+  const y = Math.round((e.clientY - rect.top) * (natH / rect.height));
   loginPost('/api/login/click', { x, y }).then(() => setTimeout(pollLogin, 600));
 };
 
