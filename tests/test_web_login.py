@@ -621,3 +621,35 @@ def test_start_uses_profile_scoped_chrome_dir(client, env):
     p = profiles.get("jen")
     assert env["drivers"][-1].profile_dir == p.linkedin_profile_dir
     assert p.linkedin_profile_dir.endswith(os.path.join("linkedin_profile", "jen"))
+
+
+# ---------------------------------------------------------------------------
+# Relayed-click scaling (viewer.html) — regression for the jen2 2FA bug:
+# the screenshot PNG is the viewport (1280x813 in headless Chrome), but the
+# viewer used to scale clicks against a hardcoded 1280x900 window, landing
+# every click ~10% too low — missing LinkedIn's "Send me a code" button.
+# ---------------------------------------------------------------------------
+VIEWER_HTML = os.path.join(os.path.dirname(__file__), "..",
+                           "agents", "viewer.html")
+
+
+def _click_handler_src() -> str:
+    with open(VIEWER_HTML, encoding="utf-8") as fh:
+        src = fh.read()
+    i = src.index("$('#login-shot').onclick")
+    return src[i:i + 700]
+
+
+def test_click_scales_by_the_screenshots_real_pixel_size():
+    h = _click_handler_src()
+    assert "naturalWidth" in h and "naturalHeight" in h
+    # the old hardcoded window size must not come back into the math
+    assert "1280 / rect.width" not in h
+    assert "900 / rect.height" not in h
+
+
+def test_continue_texts_cover_send_me_a_code_variants():
+    texts = set(web_login._CONTINUE_TEXTS)  # noqa: SLF001
+    assert "send me a code" in texts
+    assert "send code" in texts
+    assert "resend code" in texts

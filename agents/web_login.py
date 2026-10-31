@@ -81,7 +81,9 @@ TWOFA_METHODS: dict[str, dict] = {
 # Visible controls scanned for the text fallback.
 _SCAN_SELECTOR = "button, a, label, span[role='button'], input[type='submit']"
 # Buttons that submit the chosen method once selected.
-_CONTINUE_TEXTS = ("next", "send", "submit", "continue", "get a code")
+_CONTINUE_TEXTS = ("next", "send", "submit", "continue", "get a code",
+                   "send me a code", "send me the code", "send code",
+                   "resend code", "send a code")
 
 # LinkedIn's confirmation that a verification code is on its way. Matched
 # against the checkpoint page's visible body text.
