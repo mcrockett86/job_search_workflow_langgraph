@@ -32,7 +32,7 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import db, profiles, user_config, web_login
+from . import db, profiles, session_import, user_config
 from .summary import guess_title_company, preview_text, summarize
 
 logger = logging.getLogger(__name__)
@@ -212,9 +212,9 @@ def api_run() -> JSONResponse:
             status_code=400,
             detail=(
                 "LinkedIn is not signed in for this profile yet. Click "
-                "“🔑 LinkedIn sign-in” in the toolbar and complete the login "
-                "in the relayed browser — the session is saved for this "
-                "profile only."
+                "“🔑 LinkedIn sign-in” in the toolbar and follow the "
+                "pairing steps (or paste an li_at cookie) — the session "
+                "is saved for this profile only."
             ),
         )
     run_profile = profiles.current_slug()
@@ -347,106 +347,97 @@ def _salary_str(r: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# LinkedIn sign-in through the browser (per search profile)
+# LinkedIn sign-in by session import (per search profile)
 #
-# The VPS has no screen, so the viewer relays a real LinkedIn login page:
-# screenshots stream to the client, keystrokes/clicks go back. The password
-# is typed into LinkedIn's own form in-memory and never stored, logged, or
-# echoed. Only the resulting session cookies persist (in the profile's
-# Chrome dir inside the cache volume).
+# The interactive part (password, 2FA, push, passkey) happens in a REAL
+# Chrome window on the user's own machine — `python -m agents.linkedin_login
+# --pair CODE` — and this server receives only the resulting session
+# cookies over a single-use pairing code, injects them into the profile's
+# persistent Chrome dir via CDP, and verifies /feed. Cookies never appear
+# in any response, log line, or error. The manual paste path takes just the
+# li_at value for when the helper can't run.
 # ---------------------------------------------------------------------------
-class LoginCreds(BaseModel):
-    email: str
-    password: str
+class LoginPaste(BaseModel):
+    li_at: str
 
 
-class LoginText(BaseModel):
-    text: str
+class PairClaim(BaseModel):
+    code: str
+    cookies: dict[str, str]
 
 
-class LoginKeys(BaseModel):
-    key: str = "Enter"
+class PairCheck(BaseModel):
+    code: str
 
 
-class LoginClick(BaseModel):
-    x: int
-    y: int
+@app.get("/api/login/session")
+def api_login_session() -> JSONResponse:
+    """This profile's saved-session state for the viewer chip."""
+    return JSONResponse({"profile": profiles.current_slug(),
+                         **session_import.session_state(profiles.current_slug())})
 
 
-class LoginTwoFA(BaseModel):
-    method: str = ""   # "" clears the selection; else a web_login method key
+@app.post("/api/login/pair/start")
+def api_login_pair_start() -> JSONResponse:
+    """Mint a single-use pairing code for the selected profile."""
+    p = profiles.current()
+    p.ensure_dirs()
+    d = session_import.start_pair(p.slug)
+    return JSONResponse({"ok": True, "profile": p.slug, **d})
 
 
-def _login_slug() -> str:
-    return profiles.current_slug()
+@app.post("/api/login/pair/check")
+def api_login_pair_check(body: PairCheck) -> JSONResponse:
+    """Viewer polls whether its pairing code has been claimed yet.
+    The code rides in the body — it is the credential, so not in URLs."""
+    st = session_import.pair_status(body.code)
+    if st is None:
+        raise HTTPException(status_code=404, detail="Pairing code not found or expired.")
+    return JSONResponse(st)
 
 
+@app.post("/api/login/pair/claim")
+def api_login_pair_claim(body: PairClaim) -> JSONResponse:
+    """Called by the Mac helper once LinkedIn has handed it a session.
+    Auth: Caddy basic-auth (like every route) + the single-use code."""
+    try:
+        result = session_import.claim_pair(body.code, body.cookies)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(result)
+
+
+@app.post("/api/login/paste")
+def api_login_paste(body: LoginPaste) -> JSONResponse:
+    """Manual fallback: paste the li_at cookie copied from your own browser.
+    The value never appears in the response, a log line, or an error."""
+    ok, message = session_import.paste_session(profiles.current_slug(), body.li_at)
+    return JSONResponse({"ok": ok, "message": message})
+
+
+@app.post("/api/login/reset")
+def api_login_reset() -> JSONResponse:
+    """Forget this profile's saved LinkedIn session (wipes its Chrome dir)."""
+    import shutil
+    p = profiles.current()
+    shutil.rmtree(p.linkedin_profile_dir, ignore_errors=True)
+    p.ensure_dirs()
+    return JSONResponse({"ok": True, "profile": p.slug})
+
+
+# --- legacy relay endpoints (removed): kept as 410s so stale tabs fail loudly
 @app.get("/api/login/status")
-def api_login_status() -> JSONResponse:
-    """Live state of this profile's sign-in session (screenshot + status)."""
-    sess = web_login.get(_login_slug())
-    if sess is None:
-        return JSONResponse({"active": False})
-    snap = sess.snapshot()
-    return JSONResponse({"active": True, **snap})
+def api_login_status_gone() -> JSONResponse:
+    raise HTTPException(status_code=410,
+                        detail="The browser relay was replaced by session import. "
+                               "Reload the page.")
 
 
 @app.post("/api/login/start")
-def api_login_start() -> JSONResponse:
-    """Open a LinkedIn sign-in browser for the selected profile."""
-    p = profiles.current()
-    p.ensure_dirs()
-    sess = web_login.start(p.slug, p.linkedin_profile_dir)
-    return JSONResponse({"ok": True, "profile": p.slug, **sess.snapshot()})
-
-
-@app.post("/api/login/credentials")
-def api_login_credentials(body: LoginCreds) -> JSONResponse:
-    """Type email+password into LinkedIn's login form (never stored/logged)."""
-    sess = web_login.enqueue(_login_slug(), "credentials",
-                             {"email": body.email, "password": body.password})
-    if sess is None:
-        raise HTTPException(status_code=409, detail="No active sign-in session")
-    return JSONResponse({"ok": True})
-
-
-@app.post("/api/login/text")
-def api_login_text(body: LoginText) -> JSONResponse:
-    sess = web_login.enqueue(_login_slug(), "text", {"text": body.text})
-    if sess is None:
-        raise HTTPException(status_code=409, detail="No active sign-in session")
-    return JSONResponse({"ok": True})
-
-
-@app.post("/api/login/keys")
-def api_login_keys(body: LoginKeys) -> JSONResponse:
-    sess = web_login.enqueue(_login_slug(), "keys", {"key": body.key})
-    if sess is None:
-        raise HTTPException(status_code=409, detail="No active sign-in session")
-    return JSONResponse({"ok": True})
-
-
-@app.post("/api/login/click")
-def api_login_click(body: LoginClick) -> JSONResponse:
-    sess = web_login.enqueue(_login_slug(), "click", {"x": body.x, "y": body.y})
-    if sess is None:
-        raise HTTPException(status_code=409, detail="No active sign-in session")
-    return JSONResponse({"ok": True})
-
-
-@app.post("/api/login/twofa")
-def api_login_twofa(body: LoginTwoFA) -> JSONResponse:
-    """Pick (or clear) a two-factor verification method on LinkedIn's page.
-    Available options and the current pick ride along in /api/login/status."""
-    sess = web_login.enqueue(_login_slug(), "twofa", {"method": body.method})
-    if sess is None:
-        raise HTTPException(status_code=409, detail="No active sign-in session")
-    return JSONResponse({"ok": True, **sess.snapshot()})
-
-
-@app.post("/api/login/cancel")
-def api_login_cancel() -> JSONResponse:
-    return JSONResponse({"ok": web_login.cancel(_login_slug())})
+def api_login_start_gone() -> JSONResponse:
+    raise HTTPException(status_code=410,
+                        detail="The browser relay was replaced by session import. "
+                               "Reload the page.")
 
 
 # ---------------------------------------------------------------------------
