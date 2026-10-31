@@ -92,17 +92,6 @@
   #loginmodal .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 10px; }
   #loginmodal .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
   #loginmodal input { padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; }
-  #login-shot-wrap { margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 10px;
-                     overflow: hidden; background: #0f172a; display: none; }
-  #login-shot { display: block; width: 100%; height: auto; cursor: crosshair; }
-  #login-twofa-chips .chip { padding: 6px 12px; border: 1px solid #cbd5e1;
-    border-radius: 999px; background: #fff; font-size: 13px; cursor: pointer; }
-  #login-twofa-chips .chip:hover { border-color: var(--accent); }
-  #login-twofa-chips .chip.on { background: var(--accent); color: #fff;
-    border-color: var(--accent); font-weight: 600; }
-  #login-codesent { display: none; margin-top: 10px; padding: 10px 12px;
-    border: 1px solid #a7f3d0; background: #ecfdf5; color: #065f46;
-    border-radius: 10px; font-size: 13.5px; font-weight: 600; }
   #cfgmodal .panel { position: absolute; right: 0; top: 0; bottom: 0;
                      width: min(560px, 94vw); background: #fff; padding: 22px 24px;
                      overflow-y: auto; box-shadow: -8px 0 30px rgba(15,23,42,.25); }
@@ -217,33 +206,39 @@
 <div id="loginmodal"><div class="panel">
   <button class="close secondary" id="login-close">✕ close</button>
   <h2>LinkedIn sign-in</h2>
-  <div class="hint">A real LinkedIn page is open on the server. You type your
-    credentials into the form below and we type them into <b>LinkedIn's own
-    page</b> — they are never stored, logged, or sent anywhere else. Only the
-    resulting session cookies are saved, for profile
-    <b id="login-prof">?</b> — future scans run without any password.</div>
-  <div id="login-shot-wrap"><img id="login-shot" alt="LinkedIn sign-in page" width="1280" height="900"></div>
-  <div class="hint" id="login-status">not started</div>
+  <div class="hint">Sign in on <b>your own computer</b> — a real browser
+    window where 2FA, push approvals and passkeys just work. The server
+    receives only the finished session (never your password) and saves it
+    for profile <b id="login-prof">?</b> alone.</div>
+
   <div class="sec">
-    <b>Sign in</b>
-    <div class="row">
-      <input type="email" id="login-email" placeholder="LinkedIn email" autocomplete="username" style="flex:1 1 200px">
-      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" style="flex:1 1 200px">
-      <button id="login-submit">Sign in on LinkedIn</button>
+    <b>Option 1 — pair from this computer</b>
+    <div class="hint">1. Start a pairing code below.<br>
+      2. Run the shown command on this Mac — a real Chrome window opens;
+      sign into LinkedIn in it. That's it.</div>
+    <div class="row"><button id="login-pair-start">Start pairing</button>
+      <span class="hint" id="login-pair-state"></span></div>
+    <div class="row" id="login-pair-cmd-row" style="display:none">
+      <input type="text" id="login-pair-cmd" readonly style="flex:1 1 320px;font-size:12px">
+      <button class="secondary" id="login-pair-copy">copy</button>
     </div>
-    <div class="hint">2FA or a challenge on the page? Click the picture to focus the field, then type below:</div>
-    <div id="login-twofa" style="display:none">
-      <div class="hint" style="margin-bottom:2px">Verification method — LinkedIn is offering:</div>
-      <div class="row" id="login-twofa-chips"></div>
-    </div>
-    <div id="login-codesent" role="status" aria-live="polite"></div>
+  </div>
+
+  <div class="sec">
+    <b>Option 2 — paste a session cookie</b>
+    <div class="hint">In a browser already signed into LinkedIn: DevTools →
+      Application → Cookies → linkedin.com → copy the <b>li_at</b> value,
+      paste it here. (Password-equivalent — this site is behind a login.)</div>
     <div class="row">
-      <input type="text" id="login-extra" placeholder="type into the page (codes, text…)" style="flex:1 1 220px">
-      <button class="secondary" id="login-send">Send</button>
-      <button class="secondary" id="login-enter">⏎ Enter</button>
+      <input type="password" id="login-liat" placeholder="li_at value" style="flex:1 1 260px">
+      <button id="login-paste-btn">Import session</button>
     </div>
+  </div>
+
+  <div class="sec">
     <div class="row">
-      <button class="secondary" id="login-cancel">Cancel sign-in</button>
+      <span class="hint" id="login-sess-state"></span>
+      <button class="secondary" id="login-reset">Forget saved session</button>
     </div>
   </div>
   <div class="msg" id="login-msg"></div>
@@ -549,8 +544,11 @@ async function cfgReset(which, label) {
 $('#cfg-resume-reset').onclick = () => cfgReset('resume', 'Resume');
 $('#cfg-urls-reset').onclick = () => cfgReset('urls', 'URLs');
 
-// ---- LinkedIn sign-in relay --------------------------------------------------
-let loginTimer = null;
+// ---- LinkedIn sign-in by session import -------------------------------------
+// The interactive login happens in a real Chrome window on the user's own
+// machine (`python -m agents.linkedin_login --pair CODE`); this server only
+// receives the finished session cookies. Option 2 pastes li_at directly.
+let pairTimer = null, pairCode = '';
 function loginMsg(text, ok) {
   const m = $('#login-msg');
   m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'err');
@@ -564,138 +562,69 @@ async function loginPost(path, body) {
   if (!r.ok) { loginMsg(d.detail || 'Request failed.', false); return null; }
   return d;
 }
-async function pollLogin() {
-  const r = await fetch(purl('/api/login/status'));
-  if (!r.ok) return;
+async function refreshSessionChip() {
+  try {
+    const r = await fetch(purl('/api/login/session'));
+    const d = await r.json();
+    $('#login-sess-state').textContent = d.state === 'saved'
+      ? 'Saved session: present for ' + prof() + ' (LinkedIn re-validates at scan time)'
+      : 'Saved session: none yet';
+  } catch { /* viewer just reloaded; chip refreshes on next open */ }
+}
+function stopPairPoll() { if (pairTimer) { clearInterval(pairTimer); pairTimer = null; } }
+async function pollPair() {
+  if (!pairCode) return;
+  const r = await fetch(purl('/api/login/pair/check'),
+    { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: pairCode }) });
+  if (!r.ok) { stopPairPoll(); $('#login-pair-state').textContent = 'pairing code expired — start again'; return; }
   const d = await r.json();
-  if (!d.active) {
-    $('#login-status').textContent = 'not started';
-    $('#login-shot-wrap').style.display = 'none';
-    $('#login-twofa').style.display = 'none';
-    $('#login-codesent').style.display = 'none';
-    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
-    return;
-  }
-  $('#login-status').textContent = `${d.message}  ·  page: ${d.url_host || '…'}  ·  ${d.elapsed}s`;
-  renderTwoFA(d);
-  renderCodeSent(d);
-  if (d.screenshot) {
-    $('#login-shot-wrap').style.display = 'block';
-    $('#login-shot').src = 'data:image/png;base64,' + d.screenshot;
-  }
-  if (d.status === 'success') {
-    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
-    $('#login-twofa').style.display = 'none';
-    $('#login-codesent').style.display = 'none';
-    loginMsg('Signed in for ' + prof() + ' — you can close this and hit ▶ Run new scan.', true);
-    $('#login-email').value = ''; $('#login-password').value = '';
-    $('#login-extra').value = '';
-  } else if (d.status === 'failed' || d.status === 'cancelled') {
-    if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
-    $('#login-twofa').style.display = 'none';
-    $('#login-codesent').style.display = 'none';
-    loginMsg(d.message, false);
-  }
-}
-// Two-factor method toggle: LinkedIn's checkpoint page lists the options it
-// offers (authenticator app, SMS, email, app notification). Chips appear
-// whenever the relayed page shows them; clicking one picks that method on
-// LinkedIn's page, clicking the active chip again clears the selection.
-function renderTwoFA(d) {
-  const wrap = $('#login-twofa');
-  const box = $('#login-twofa-chips');
-  const opts = d.twofa_options || {};
-  const keys = Object.keys(opts);
-  if (!keys.length) { wrap.style.display = 'none'; box.innerHTML = ''; return; }
-  wrap.style.display = 'block';
-  box.innerHTML = '';
-  for (const k of keys) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'chip' + (d.twofa_selected === k ? ' on' : '');
-    b.textContent = opts[k];
-    b.onclick = async () => {
-      const next = d.twofa_selected === k ? '' : k;   // toggle off if active
-      b.disabled = true;
-      const r = await loginPost('/api/login/twofa', { method: next });
-      b.disabled = false;
-      if (r) setTimeout(pollLogin, 600);
-    };
-    box.appendChild(b);
-  }
-}
-// 'Code sent' banner: LinkedIn's checkpoint page confirmed a verification
-// code is on its way, so the user knows to go check their phone/email.
-// The notice text comes from the server (destination only as LinkedIn
-// itself masks it); aria-live announces it when it appears.
-function renderCodeSent(d) {
-  const b = $('#login-codesent');
-  if (d.code_sent && d.code_notice) {
-    if (b.textContent !== d.code_notice) b.textContent = d.code_notice;
-    b.style.display = 'block';
-    $('#login-extra').placeholder = 'enter the code LinkedIn sent…';
+  if (d.state === 'claimed') {
+    stopPairPoll();
+    const ok = d.result && d.result.ok;
+    $('#login-pair-state').textContent = ok ? 'session imported ✓' : 'import failed';
+    loginMsg(ok ? 'Signed in for ' + prof() + ' — close this and hit ▶ Run new scan.'
+                : (d.result && d.result.message) || 'The server rejected the session.', !!ok);
+    refreshSessionChip();
   } else {
-    b.style.display = 'none';
-    b.textContent = '';
-    $('#login-extra').placeholder = 'type into the page (codes, text…)';
+    $('#login-pair-state').textContent = 'waiting for the sign-in window…';
   }
 }
-$('#loginbtn').onclick = async () => {
+$('#login-pair-start').onclick = async () => {
+  const d = await loginPost('/api/login/pair/start');
+  if (!d) return;
+  pairCode = d.code;
+  const cmd = 'cd ~/code/job_search_langgraph_mcp && uv run python -m agents.linkedin_login --pair ' + d.code + ' --profile ' + prof();
+  $('#login-pair-cmd').value = cmd;
+  $('#login-pair-cmd-row').style.display = 'flex';
+  $('#login-pair-state').textContent = 'code ' + d.code + ' · expires in ' + Math.round(d.expires_in / 60) + ' min';
+  stopPairPoll(); pairTimer = setInterval(pollPair, 2000);
+};
+$('#login-pair-copy').onclick = () => {
+  const el = $('#login-pair-cmd'); el.select();
+  navigator.clipboard.writeText(el.value).then(() => loginMsg('Command copied — paste into Terminal on this Mac.', true));
+};
+$('#login-paste-btn').onclick = async () => {
+  const v = $('#login-liat').value.trim();
+  if (!v) return loginMsg('Paste the li_at cookie value first.', false);
+  const d = await loginPost('/api/login/paste', { li_at: v });
+  $('#login-liat').value = '';              // wipe from the DOM immediately
+  if (d) { loginMsg(d.message, d.ok); refreshSessionChip(); }
+};
+$('#login-reset').onclick = async () => {
+  if (!confirm('Forget the saved LinkedIn session for ' + prof() + '? Scans will need a new sign-in.')) return;
+  if (await loginPost('/api/login/reset')) { loginMsg('Saved session forgotten.', true); refreshSessionChip(); }
+};
+$('#loginbtn').onclick = () => {
   $('#loginmodal').style.display = 'block';
   $('#login-prof').textContent = prof();
   $('#login-msg').textContent = '';
-  const d = await loginPost('/api/login/start');
-  if (!d) return;
-  if (loginTimer) clearInterval(loginTimer);
-  loginTimer = setInterval(pollLogin, 1500);
-  pollLogin();
+  refreshSessionChip();
 };
-$('#login-close').onclick = () => {
-  $('#loginmodal').style.display = 'none';   // session keeps running server-side
-};
+$('#login-close').onclick = () => { $('#loginmodal').style.display = 'none'; stopPairPoll(); };
 $('#loginmodal').addEventListener('click', (e) => {
-  if (e.target.id === 'loginmodal') $('#loginmodal').style.display = 'none';
+  if (e.target.id === 'loginmodal') { $('#loginmodal').style.display = 'none'; stopPairPoll(); }
 });
-$('#login-submit').onclick = async () => {
-  const email = $('#login-email').value.trim();
-  const password = $('#login-password').value;
-  if (!email || !password) return loginMsg('Enter both email and password.', false);
-  if (await loginPost('/api/login/credentials', { email, password })) {
-    $('#login-password').value = '';         // wipe from the DOM immediately
-    loginMsg('Typed into LinkedIn — watch the picture above.', true);
-    setTimeout(pollLogin, 800);
-  }
-};
-$('#login-send').onclick = async () => {
-  const text = $('#login-extra').value;
-  if (!text) return;
-  if (await loginPost('/api/login/text', { text })) {
-    $('#login-extra').value = '';
-    setTimeout(pollLogin, 600);
-  }
-};
-$('#login-enter').onclick = async () => {
-  if (await loginPost('/api/login/keys', { key: 'Enter' })) setTimeout(pollLogin, 600);
-};
-$('#login-cancel').onclick = async () => {
-  await loginPost('/api/login/cancel');
-  loginMsg('Sign-in cancelled — nothing was saved.', false);
-};
-// Click the relayed page: scale click coords to the screenshot's REAL size.
-// The PNG is the browser's viewport (1280 wide, but its height is whatever
-// the window's content area actually is — e.g. 813 in headless Chrome, not
-// the 900 we asked for). Scaling by the image's intrinsic pixel size maps
-// image px -> viewport CSS px exactly; the old hardcoded 1280x900 pushed
-// every click ~10% too low, which missed buttons near the page bottom
-// (LinkedIn's "Send me a code").
-$('#login-shot').onclick = (e) => {
-  const img = $('#login-shot');
-  const rect = img.getBoundingClientRect();
-  const natW = img.naturalWidth || 1280, natH = img.naturalHeight || 900;
-  const x = Math.round((e.clientX - rect.left) * (natW / rect.width));
-  const y = Math.round((e.clientY - rect.top) * (natH / rect.height));
-  loginPost('/api/login/click', { x, y }).then(() => setTimeout(pollLogin, 600));
-};
 
 // profile first: every data call carries ?profile=, so the selector,
 // storage, and the visible list must agree before the first paint.
